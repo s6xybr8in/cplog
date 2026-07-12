@@ -1,0 +1,335 @@
+@import "tailwindcss";
+@import "katex/dist/katex.min.css";
+
+@theme {
+  /* Dark is the app default — see :root[data-theme] overrides below */
+  --color-bg: #12151a;
+  --color-surface: #1a1e25;
+  --color-surface-alt: #20252d;
+  --color-border: #2c323c;
+
+  --color-ink: #edeff3;
+  --color-ink-muted: #a0a8b4;
+  --color-ink-faint: #6b7280;
+
+  --color-accent: #2bb8ae;
+  --color-accent-strong: #4fd0c5;
+  --color-accent-soft: #163832;
+  --color-accent-hover: #1e8a82;
+
+  --color-success: #34d399;
+  --color-success-soft: #113325;
+  --color-warning: #fbbf24;
+  --color-warning-soft: #3a2a0c;
+  --color-danger: #f87171;
+  --color-danger-soft: #3a1518;
+
+  --color-tier-gray: #9ca3af;
+  --color-tier-green: #4ade80;
+  --color-tier-cyan: #22d3ee;
+  --color-tier-blue: #60a5fa;
+  --color-tier-purple: #a78bfa;
+  --color-tier-orange: #fb923c;
+  --color-tier-red: #f87171;
+
+  --font-sans: "Manrope", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", monospace;
+  --font-serif: "Source Serif 4", ui-serif, Georgia, serif;
+}
+
+:root,
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --code-fg: #edeff3;
+  --code-comment: #6b7280;
+  --code-string: #4ade80;
+  --code-number: #fbbf24;
+  --code-keyword: #c4b5fd;
+  --code-builtin: #60a5fa;
+  --code-title: #5eead4;
+  --code-meta: #9ca3af;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --color-bg: #f6f7f9;
+  --color-surface: #ffffff;
+  --color-surface-alt: #eef1f5;
+  --color-border: #dde2e9;
+
+  --color-ink: #171c26;
+  --color-ink-muted: #5b6472;
+  --color-ink-faint: #8a91a0;
+
+  --color-accent: #0e7c86;
+  --color-accent-strong: #0b626a;
+  --color-accent-soft: #e3f2f1;
+  --color-accent-hover: #0b626a;
+
+  --color-success: #1e9e58;
+  --color-success-soft: #e4f6ec;
+  --color-warning: #d97706;
+  --color-warning-soft: #fcefda;
+  --color-danger: #dc2626;
+  --color-danger-soft: #fbe7e7;
+
+  --color-tier-gray: #6b7280;
+  --color-tier-green: #16a34a;
+  --color-tier-cyan: #0891b2;
+  --color-tier-blue: #2563eb;
+  --color-tier-purple: #7c3aed;
+  --color-tier-orange: #ea580c;
+  --color-tier-red: #dc2626;
+
+  --code-fg: #171c26;
+  --code-comment: #8a91a0;
+  --code-string: #1e9e58;
+  --code-number: #d97706;
+  --code-keyword: #7c3aed;
+  --code-builtin: #2563eb;
+  --code-title: #0e7c86;
+  --code-meta: #6b7280;
+}
+
+@layer base {
+  * {
+    border-color: var(--color-border);
+  }
+
+  body {
+    background: var(--color-bg);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  ::selection {
+    background: var(--color-accent-soft);
+    color: var(--color-accent-strong);
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--color-border);
+    border-radius: 999px;
+    border: 2px solid var(--color-bg);
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--color-ink-faint);
+  }
+}
+
+@layer components {
+  .cp-input {
+    @apply w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm text-ink outline-none transition-colors placeholder:text-ink-faint focus:border-accent;
+  }
+  .cp-btn-primary {
+    @apply inline-flex items-center gap-1.5 rounded-lg bg-accent px-3.5 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-50;
+  }
+  .cp-btn-ghost {
+    @apply inline-flex items-center gap-1.5 rounded-lg px-3.5 py-2 text-sm font-semibold text-ink-muted transition-colors hover:bg-surface-alt hover:text-ink;
+  }
+}
+
+/* Markdown preview typography */
+.cp-prose {
+  font-family: var(--font-serif);
+  color: var(--color-ink);
+  line-height: 1.75;
+  font-size: 1rem;
+}
+.cp-prose > :first-child {
+  margin-top: 0;
+}
+.cp-prose h1,
+.cp-prose h2,
+.cp-prose h3 {
+  font-family: var(--font-sans);
+  font-weight: 700;
+  color: var(--color-ink);
+  text-wrap: balance;
+  line-height: 1.3;
+}
+.cp-prose h1 {
+  font-size: 1.6rem;
+  margin: 1.75rem 0 0.75rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--color-border);
+}
+.cp-prose h2 {
+  font-size: 1.25rem;
+  margin: 1.75rem 0 0.6rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.cp-prose h3 {
+  font-size: 1.05rem;
+  margin: 1.4rem 0 0.5rem;
+}
+.cp-prose p {
+  margin: 0.75rem 0;
+}
+.cp-prose a {
+  color: var(--color-accent-strong);
+  text-decoration: underline;
+  text-decoration-color: var(--color-accent-soft);
+  text-underline-offset: 2px;
+}
+.cp-prose .cp-wikilink {
+  cursor: pointer;
+}
+/* 대상 노트가 없는 위키링크 — 옵시디언의 미해결 링크 관례(흐림 + 점선) */
+.cp-prose .cp-wikilink-missing {
+  color: var(--color-ink-faint);
+  text-decoration-style: dashed;
+  text-decoration-color: var(--color-ink-faint);
+}
+.cp-prose ul,
+.cp-prose ol {
+  margin: 0.75rem 0;
+  padding-left: 1.4rem;
+}
+.cp-prose ul {
+  list-style: disc;
+}
+.cp-prose ol {
+  list-style: decimal;
+}
+.cp-prose li {
+  margin: 0.3rem 0;
+}
+.cp-prose blockquote {
+  margin: 1rem 0;
+  padding: 0.1rem 1rem;
+  border-left: 3px solid var(--color-accent);
+  background: var(--color-accent-soft);
+  color: var(--color-ink-muted);
+  border-radius: 0 0.375rem 0.375rem 0;
+}
+.cp-prose hr {
+  border: none;
+  border-top: 1px solid var(--color-border);
+  margin: 2rem 0;
+}
+.cp-prose table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1rem 0;
+  font-family: var(--font-sans);
+  font-size: 0.9rem;
+}
+.cp-prose th,
+.cp-prose td {
+  border: 1px solid var(--color-border);
+  padding: 0.4rem 0.6rem;
+  text-align: left;
+}
+.cp-prose th {
+  background: var(--color-surface-alt);
+  font-weight: 600;
+}
+.cp-prose code:not(pre code) {
+  font-family: var(--font-mono);
+  background: var(--color-surface-alt);
+  color: var(--color-accent-strong);
+  padding: 0.15em 0.4em;
+  border-radius: 0.3rem;
+  font-size: 0.85em;
+}
+.cp-prose pre {
+  margin: 1rem 0;
+  padding: 1rem;
+  background: var(--color-surface-alt);
+  border: 1px solid var(--color-border);
+  border-radius: 0.5rem;
+  overflow-x: auto;
+}
+.cp-prose pre code.hljs {
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  background: transparent;
+  padding: 0;
+  color: var(--code-fg);
+}
+.hljs-comment,
+.hljs-quote {
+  color: var(--code-comment);
+  font-style: italic;
+}
+.hljs-string,
+.hljs-doctag,
+.hljs-regexp,
+.hljs-symbol,
+.hljs-bullet,
+.hljs-link,
+.hljs-addition {
+  color: var(--code-string);
+}
+.hljs-number,
+.hljs-literal,
+.hljs-deletion {
+  color: var(--code-number);
+}
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-subst {
+  color: var(--code-keyword);
+  font-weight: 600;
+}
+.hljs-built_in,
+.hljs-type,
+.hljs-class .hljs-title {
+  color: var(--code-builtin);
+}
+.hljs-title,
+.hljs-title.function_,
+.hljs-title.class_,
+.hljs-function .hljs-title {
+  color: var(--code-title);
+  font-weight: 600;
+}
+.hljs-meta,
+.hljs-meta .hljs-keyword {
+  color: var(--code-meta);
+}
+.hljs-emphasis {
+  font-style: italic;
+}
+.hljs-strong {
+  font-weight: 700;
+}
+.cp-prose img {
+  max-width: 100%;
+  border-radius: 0.5rem;
+}
+.cp-prose .katex {
+  font-size: 1.02em;
+}
+.cp-prose .katex-display {
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0.25rem 0;
+}
+
+/* Kanban drag state */
+.cp-card-dragging {
+  opacity: 0.4;
+}
+.cp-column-droptarget {
+  background: var(--color-accent-soft) !important;
+  outline: 2px dashed var(--color-accent);
+  outline-offset: -2px;
+}
