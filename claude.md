@@ -84,6 +84,14 @@
 - **저지 API CORS (2026-07-13 브라우저 실측)**: codeforces.com/api(user.status, problemset.problems)와 kenkoooo.com/atcoder/atcoder-api/v3(user/submissions)는 브라우저 fetch 허용. **solved.ac API와 kenkoooo problems.json(S3 정적)은 차단** — BOJ 티어 조회·AtCoder 난이도는 프록시 없이 불가하니 재시도하지 말 것.
 - **vite.config.js의 `server.watch.ignored: ['**/.omc/**']`를 제거하지 말 것** — OMC(에이전트 툴링) 훅이 `.omc/state/*.json`을 수 초 간격으로 갱신해 dev 서버가 풀 리로드를 반복, E2E가 랜덤한 지점에서 실패하는 가짜 플레이크를 만든다 (Ctrl+K E2E에서 실제 발생해 수정).
 
+## 🚀 배포 (2026-07-13 완료)
+- **라이브**: https://s6xybr8in.github.io/cplog/ · **리포**: https://github.com/s6xybr8in/cplog (공개)
+- `main` push마다 GitHub Actions(`.github/workflows/deploy.yml`)가 빌드·배포. Pages는 `build_type=workflow`로 활성화됨.
+- **base 경로는 CI에서만** `DEPLOY_BASE=/cplog/` env로 주입 (vite.config.js) — 로컬 dev/E2E는 `/` 그대로. 리포 이름을 바꾸면 워크플로의 DEPLOY_BASE도 함께 수정할 것.
+- 공개 리포이므로 **개인 연습 기록(260709.md, contest1.md)과 `.omc/`는 .gitignore로 제외** — 커밋 전 `git status`로 개인 파일 유입 확인 습관.
+- gh CLI 설치됨(winget, `C:\Program Files\GitHub CLI\gh.exe`), `s6xybr8in` 계정으로 인증. 기존 셸 PATH에는 없을 수 있어 전체 경로 호출이 안전.
+- 주의: Git Bash에서 `DEPLOY_BASE=/cplog/`처럼 `/`로 시작하는 env 값은 MSYS가 Windows 경로로 변환해버림 — 로컬에서 base 검증할 땐 PowerShell 사용.
+
 ## 🚧 다음 작업
 없음 — 승인된 계획(~/.claude/plans/snug-snacking-pike.md)의 4개 스코프(스니펫·CodeMirror·Ctrl+K·복습 큐) 전부 완료 (완료된 기능 #6~#9).
 
