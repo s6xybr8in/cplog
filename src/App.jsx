@@ -3797,36 +3797,43 @@ export default function App() {
 
   // --- 이미지 에셋: 붙여넣기 시 업로드 큐 등록 + 프리뷰용 경로 해석 ---
   const addAsset = (path) => markDirty(path) // 데이터 리포 업로드 큐(다음 동기화에 반영)
-  // assets/ 경로 → objectURL. 캐시 → IndexedDB → (동기화 설정 시)데이터 리포 Contents API 순
+  // 에셋 blob 로드 — IndexedDB → (동기화 설정 시)데이터 리포 Contents API. 프리뷰·발행 공용.
+  const loadAssetBlob = useCallback(
+    async (path) => {
+      try {
+        const b = await idbGetAsset(path)
+        if (b) return b
+      } catch {
+        // IndexedDB 접근 불가
+      }
+      if (!isSyncConfigured(gh)) return null
+      try {
+        const branch = gh.dataBranch?.trim() || 'main'
+        const res = await ghFetch(gh.pat, `/repos/${gh.username.trim()}/${gh.dataRepo.trim()}/contents/${path}?ref=${branch}`)
+        if (res.ok) {
+          const blob = new Blob([base64ToBytes((await res.json()).content || '')])
+          idbPutAsset(path, blob).catch(() => {})
+          return blob
+        }
+      } catch {
+        // 네트워크 실패
+      }
+      return null
+    },
+    [gh],
+  )
+  // assets/ 경로 → objectURL. 캐시 → loadAssetBlob 순
   const resolveAsset = useCallback(
     async (path) => {
       if (!isAssetPath(path)) return path
       if (assetCache.has(path)) return assetCache.get(path)
-      let blob = null
-      try {
-        blob = await idbGetAsset(path)
-      } catch {
-        // IndexedDB 접근 불가
-      }
-      if (!blob && isSyncConfigured(gh)) {
-        try {
-          const branch = gh.dataBranch?.trim() || 'main'
-          const res = await ghFetch(gh.pat, `/repos/${gh.username.trim()}/${gh.dataRepo.trim()}/contents/${path}?ref=${branch}`)
-          if (res.ok) {
-            const json = await res.json()
-            blob = new Blob([base64ToBytes(json.content || '')])
-            idbPutAsset(path, blob).catch(() => {})
-          }
-        } catch {
-          // 네트워크 실패 — 아래에서 null 반환(플레이스홀더)
-        }
-      }
+      const blob = await loadAssetBlob(path)
       if (!blob) return null
       const url = URL.createObjectURL(blob)
       assetCache.set(path, url)
       return url
     },
-    [gh],
+    [loadAssetBlob],
   )
 
   // --- 그룹 (문제집) ---
@@ -4271,8 +4278,41 @@ export default function App() {
     const branchName = branch.trim() || 'main'
     const path = `_posts/${formatDate(new Date())}-${slugify(note.title)}.md`
     const basePath = `/repos/${username.trim()}/${repo.trim()}/contents/${path}`
+
+    // 블로그(공개 리포)로 발행 시, 노트가 참조하는 assets/ 이미지는 데이터 리포(private)에만 있어
+    // 그대로면 깨진다. → 이미지를 공개 블로그 리포 assets/로 업로드하고 마크다운을 절대 raw URL로 치환.
+    let content = note.content
+    let imageCount = 0
+    try {
+      const assetPaths = [...new Set([...content.matchAll(/!\[[^\]]*\]\((assets\/[^)\s]+)\)/g)].map((m) => m[1]))]
+      for (const aPath of assetPaths) {
+        const blob = await loadAssetBlob(aPath)
+        if (!blob) continue // 로컬·데이터리포 어디에도 없으면 스킵(그대로 두면 깨지지만 드묾)
+        const b64 = await blobToBase64(blob)
+        const aBase = `/repos/${username.trim()}/${repo.trim()}/contents/${aPath}`
+        const putAsset = (sha) =>
+          ghFetch(pat, aBase, {
+            method: 'PUT',
+            body: JSON.stringify({ message: `post asset: ${aPath}`, content: b64, branch: branchName, ...(sha ? { sha } : {}) }),
+          })
+        // 이미 있으면 sha로 덮어씀(내용 동일하면 GitHub이 그대로 둠)
+        const ex = await ghFetch(pat, `${aBase}?ref=${branchName}`)
+        let ares = await putAsset(ex.status === 200 ? (await ex.json()).sha : undefined)
+        if (ares.status === 409 || ares.status === 422) {
+          const rg = await ghFetch(pat, `${aBase}?ref=${branchName}`)
+          if (rg.ok) ares = await putAsset((await rg.json()).sha)
+        }
+        if (!ares.ok) continue
+        const rawUrl = `https://raw.githubusercontent.com/${username.trim()}/${repo.trim()}/${branchName}/${aPath}`
+        content = content.split(`](${aPath})`).join(`](${rawUrl})`)
+        imageCount += 1
+      }
+    } catch {
+      // 이미지 처리 실패는 발행 자체를 막지 않음 — 남은 assets/ 링크는 깨진 채로 발행될 수 있음
+    }
+
     // 블로그에는 [[위키링크]]가 렌더되지 않으므로 제목 텍스트로 변환해 발행
-    const body = buildFrontMatter(note) + note.content.replace(/\[\[([^\][\n]+?)\]\]/g, '$1')
+    const body = buildFrontMatter(note) + content.replace(/\[\[([^\][\n]+?)\]\]/g, '$1')
 
     const doPut = (shaToUse) =>
       ghFetch(pat, basePath, {
@@ -4303,7 +4343,7 @@ export default function App() {
       if (!putRes.ok) throw new Error((await safeJson(putRes))?.message || `발행 실패 (${putRes.status})`)
 
       updateNote(note.id, { published: true, publishedPath: path })
-      addToast('success', `"${note.title || 'untitled'}" 발행 완료 → ${path}`)
+      addToast('success', `"${note.title || 'untitled'}" 발행 완료 → ${path}${imageCount ? ` (이미지 ${imageCount}개 포함)` : ''}`)
     } catch (err) {
       addToast('error', err.message || '발행 중 오류가 발생했습니다.')
     } finally {
