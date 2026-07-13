@@ -31,8 +31,6 @@ import {
   Search,
   CalendarClock,
   RotateCcw,
-  List,
-  Columns3,
   Zap,
   Trophy,
   CalendarPlus,
@@ -93,14 +91,14 @@ const DIFFICULTY_TIER_BADGE = {
   red: 'bg-tier-red/10 text-tier-red',
 }
 
+// 상태는 To Do / Done 2가지만 (In Progress는 2026-07-13 제거 — 사용자 요청)
 const COLUMNS = [
   { key: 'todo', label: 'To Do', hint: '풀어야 할 문제' },
-  { key: 'in_progress', label: 'In Progress', hint: '풀고 있는 문제' },
   { key: 'done', label: 'Done', hint: '해결 완료 · 노트 작성' },
 ]
 
-// 리스트 뷰 정렬 순서 — 붙잡고 있는 문제(업솔빙 포함)가 맨 위, 끝난 문제가 맨 아래
-const STATUS_ORDER = { in_progress: 0, todo: 1, done: 2 }
+// 리스트 뷰 정렬 순서 — 미해결이 위, 끝난 문제가 맨 아래
+const STATUS_ORDER = { todo: 0, done: 1 }
 
 const TAG_SUGGESTIONS = ['DP', '그리디', '그래프', '이분탐색', '수론', 'BFS/DFS', '자료구조', '문자열', '구현']
 
@@ -901,19 +899,21 @@ function buildFolderTree(folders) {
 
 const noteDragPayload = 'text/cplog-note'
 
-function SidebarNoteRow({ note, active, depth, onSelect, onDelete }) {
+function SidebarNoteRow({ note, active, selected, depth, onRowClick, onDragStartNote, onDelete }) {
   return (
     <div
       draggable
-      onDragStart={(e) => {
-        e.dataTransfer.setData(noteDragPayload, note.id)
-        e.dataTransfer.effectAllowed = 'move'
-      }}
-      className={cn('group mb-0.5 flex items-center gap-1 rounded-lg py-1 pr-1', active ? 'bg-accent-soft' : 'hover:bg-surface-alt')}
+      onDragStart={(e) => onDragStartNote(e, note.id)}
+      className={cn(
+        'group mb-0.5 flex items-center gap-1 rounded-lg py-1 pr-1',
+        selected ? 'bg-accent-soft ring-1 ring-inset ring-accent/50' : active ? 'bg-accent-soft' : 'hover:bg-surface-alt',
+      )}
       style={{ paddingLeft: 4 + depth * 14 }}
     >
-      <button onClick={() => onSelect(note.id)} className="min-w-0 flex-1 rounded-lg px-1.5 py-1 text-left">
-        <p className={cn('truncate text-[12.5px] font-semibold', active ? 'text-accent-strong' : 'text-ink')}>{note.title || '제목 없음'}</p>
+      <button onClick={(e) => onRowClick(e, note.id)} className="min-w-0 flex-1 select-none rounded-lg px-1.5 py-1 text-left">
+        <p className={cn('truncate text-[12.5px] font-semibold', active || selected ? 'text-accent-strong' : 'text-ink')}>
+          {note.title || '제목 없음'}
+        </p>
         <p className="mt-0.5 flex items-center gap-1 text-[10.5px] text-ink-faint">
           {note.published ? <CheckCircle2 size={10} className="text-success" /> : <Clock size={10} />}
           {note.published ? '발행됨' : '초안'}
@@ -929,7 +929,15 @@ function SidebarNoteRow({ note, active, depth, onSelect, onDelete }) {
   )
 }
 
-function FolderTreeNode({ folder, depth, byParent, notes, activeNoteId, collapsedFolders, actions }) {
+function parseNoteDragIds(e) {
+  try {
+    return JSON.parse(e.dataTransfer.getData(noteDragPayload))
+  } catch {
+    return null
+  }
+}
+
+function FolderTreeNode({ folder, depth, byParent, notes, activeNoteId, selectedNotes, collapsedFolders, actions }) {
   const [dragOver, setDragOver] = useState(false)
   const open = !collapsedFolders.includes(folder.id)
   const childFolders = byParent.get(folder.id) || []
@@ -948,8 +956,8 @@ function FolderTreeNode({ folder, depth, byParent, notes, activeNoteId, collapse
         onDrop={(e) => {
           e.stopPropagation()
           setDragOver(false)
-          const id = e.dataTransfer.getData(noteDragPayload)
-          if (id) actions.onMoveNote(id, folder.id)
+          const ids = parseNoteDragIds(e)
+          if (ids) actions.onMoveNotes(ids, folder.id)
         }}
         className={cn(
           'group mb-0.5 flex items-center gap-0.5 rounded-lg py-1 pr-1',
@@ -1002,6 +1010,7 @@ function FolderTreeNode({ folder, depth, byParent, notes, activeNoteId, collapse
               byParent={byParent}
               notes={notes}
               activeNoteId={activeNoteId}
+              selectedNotes={selectedNotes}
               collapsedFolders={collapsedFolders}
               actions={actions}
             />
@@ -1011,8 +1020,10 @@ function FolderTreeNode({ folder, depth, byParent, notes, activeNoteId, collapse
               key={n.id}
               note={n}
               active={n.id === activeNoteId}
+              selected={selectedNotes.has(n.id)}
               depth={depth + 1}
-              onSelect={actions.onSelectNote}
+              onRowClick={actions.onNoteRowClick}
+              onDragStartNote={actions.onDragStartNote}
               onDelete={actions.onDeleteNote}
             />
           ))}
@@ -1050,7 +1061,54 @@ function Sidebar({
   const rootFolders = byParent.get(null) || []
   // 폴더가 없는(또는 폴더가 사라진) 노트는 루트에
   const rootNotes = notes.filter((n) => !n.folderId || !folderIds.has(n.folderId))
-  const treeActions = { ...folderActions, onSelectNote, onDeleteNote }
+
+  // 노트 다중 선택 (클릭=열기+단일선택 / Shift=범위 / Ctrl=토글) + 선택 통째 폴더 드래그
+  const [selectedNotes, setSelectedNotes] = useState(() => new Set())
+  const noteAnchorRef = useRef(null)
+
+  // Shift-범위용 보이는(펼쳐진 폴더) 노트의 렌더 순서 — 폴더의 하위폴더 먼저, 그다음 그 폴더 노트, 마지막에 루트 노트
+  const visibleNoteOrder = []
+  const walkNotes = (folder) => {
+    if (collapsedFolders.includes(folder.id)) return
+    for (const f of byParent.get(folder.id) || []) walkNotes(f)
+    for (const n of notes.filter((n) => n.folderId === folder.id)) visibleNoteOrder.push(n.id)
+  }
+  for (const f of rootFolders) walkNotes(f)
+  for (const n of rootNotes) visibleNoteOrder.push(n.id)
+
+  const onNoteRowClick = (e, id) => {
+    if (e.shiftKey && noteAnchorRef.current != null) {
+      const a = visibleNoteOrder.indexOf(noteAnchorRef.current)
+      const b = visibleNoteOrder.indexOf(id)
+      if (a !== -1 && b !== -1) {
+        const [lo, hi] = a <= b ? [a, b] : [b, a]
+        setSelectedNotes(new Set(visibleNoteOrder.slice(lo, hi + 1)))
+      }
+    } else if (e.ctrlKey || e.metaKey) {
+      setSelectedNotes((s) => {
+        const n = new Set(s)
+        n.has(id) ? n.delete(id) : n.add(id)
+        return n
+      })
+      noteAnchorRef.current = id
+    } else {
+      setSelectedNotes(new Set([id]))
+      noteAnchorRef.current = id
+      onSelectNote(id)
+    }
+  }
+
+  const onDragStartNote = (e, id) => {
+    const ids = selectedNotes.has(id) ? [...selectedNotes] : [id]
+    if (!selectedNotes.has(id)) {
+      setSelectedNotes(new Set([id]))
+      noteAnchorRef.current = id
+    }
+    e.dataTransfer.setData(noteDragPayload, JSON.stringify(ids))
+    e.dataTransfer.effectAllowed = 'move'
+  }
+
+  const treeActions = { ...folderActions, onNoteRowClick, onDragStartNote, onDeleteNote }
 
   return (
     <aside
@@ -1101,6 +1159,14 @@ function Sidebar({
               </button>
             </div>
           </div>
+          {selectedNotes.size > 1 && (
+            <p className="mx-2 mb-1 flex items-center justify-between rounded-md bg-accent-soft px-2 py-1 text-[10.5px] text-accent-strong">
+              <span className="font-semibold">{selectedNotes.size}개 선택 · 폴더로 드래그</span>
+              <button onClick={() => setSelectedNotes(new Set())} className="text-ink-faint hover:text-ink">
+                <X size={11} />
+              </button>
+            </p>
+          )}
           {/* 리스트 빈 영역에 드롭하면 폴더 해제(루트로 이동) — 폴더 행 드롭은 stopPropagation으로 여기까지 오지 않음 */}
           <div
             className="flex-1 overflow-y-auto px-2 pb-2"
@@ -1108,8 +1174,8 @@ function Sidebar({
               if ([...e.dataTransfer.types].includes(noteDragPayload)) e.preventDefault()
             }}
             onDrop={(e) => {
-              const id = e.dataTransfer.getData(noteDragPayload)
-              if (id) folderActions.onMoveNote(id, null)
+              const ids = parseNoteDragIds(e)
+              if (ids) folderActions.onMoveNotes(ids, null)
             }}
           >
             {notes.length === 0 && folders.length === 0 && (
@@ -1123,12 +1189,22 @@ function Sidebar({
                 byParent={byParent}
                 notes={notes}
                 activeNoteId={activeNoteId}
+                selectedNotes={selectedNotes}
                 collapsedFolders={collapsedFolders}
                 actions={treeActions}
               />
             ))}
             {rootNotes.map((n) => (
-              <SidebarNoteRow key={n.id} note={n} active={n.id === activeNoteId} depth={0} onSelect={onSelectNote} onDelete={onDeleteNote} />
+              <SidebarNoteRow
+                key={n.id}
+                note={n}
+                active={n.id === activeNoteId}
+                selected={selectedNotes.has(n.id)}
+                depth={0}
+                onRowClick={onNoteRowClick}
+                onDragStartNote={onDragStartNote}
+                onDelete={onDeleteNote}
+              />
             ))}
           </div>
         </div>
@@ -1216,81 +1292,16 @@ function Field({ label, required, children }) {
 // To Solve (Kanban) board
 // ---------------------------------------------------------------------------
 
-function ProblemCard({ problem, onEdit, onDelete, onDragStart, onDragEnd }) {
-  return (
-    <div
-      draggable
-      onDragStart={(e) => onDragStart(e, problem)}
-      onDragEnd={onDragEnd}
-      className="group cursor-grab rounded-lg border border-border bg-surface p-3 shadow-sm shadow-black/10 transition-shadow hover:shadow-md active:cursor-grabbing"
-    >
-      <div className="flex items-start justify-between gap-2">
-        <p className="text-sm font-semibold leading-snug text-ink">{problem.name}</p>
-        <div className="flex shrink-0 gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
-          <button onClick={() => onEdit(problem)} className="rounded p-1 text-ink-faint hover:bg-surface-alt hover:text-ink">
-            <Pencil size={13} />
-          </button>
-          <button onClick={() => onDelete(problem)} className="rounded p-1 text-ink-faint hover:bg-danger-soft hover:text-danger">
-            <Trash2 size={13} />
-          </button>
-        </div>
-      </div>
-      <div className="mt-2 flex flex-wrap items-center gap-1.5">
-        <span className={cn('rounded-md px-1.5 py-0.5 text-[11px] font-medium', PLATFORM_BADGE[problem.platform] || PLATFORM_BADGE.Other)}>
-          {problem.platform}
-        </span>
-        <DifficultyBadge difficulty={problem.difficulty} />
-        {problem.url && (
-          <a href={problem.url} target="_blank" rel="noreferrer" className="ml-auto text-ink-faint hover:text-accent">
-            <ExternalLink size={13} />
-          </a>
-        )}
-      </div>
-      {problem.tags?.length > 0 && (
-        <div className="mt-2 flex flex-wrap gap-1">
-          {problem.tags.map((t) => (
-            <TagChip key={t}>{t}</TagChip>
-          ))}
-        </div>
-      )}
-    </div>
-  )
-}
-
-function BoardHeader({ onAddClick, count, boardMode, onSetBoardMode }) {
+function BoardHeader({ onAddClick, count }) {
   return (
     <div className="flex items-center justify-between border-b border-border px-6 py-4">
       <div>
         <h1 className="text-lg font-bold text-ink">To Solve</h1>
         <p className="text-xs text-ink-muted">{count}개의 문제를 추적하고 있습니다</p>
       </div>
-      <div className="flex items-center gap-2">
-        <div className="flex shrink-0 items-center gap-0.5 rounded-lg border border-border bg-surface-alt p-0.5">
-          <button
-            onClick={() => onSetBoardMode('list')}
-            title="리스트 보기"
-            className={cn(
-              'flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-semibold transition-colors',
-              boardMode !== 'kanban' ? 'bg-surface text-ink shadow-sm' : 'text-ink-faint hover:text-ink',
-            )}
-          >
-            <List size={13} /> 리스트
-          </button>
-          <button
-            onClick={() => onSetBoardMode('kanban')}
-            title="칸반 보드 보기"
-            className={cn(
-              'flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-semibold transition-colors',
-              boardMode === 'kanban' ? 'bg-surface text-ink shadow-sm' : 'text-ink-faint hover:text-ink',
-            )}
-          >
-            <Columns3 size={13} /> 보드
-          </button>
-        </div>
-        <button onClick={onAddClick} className="cp-btn-primary">
-          <Plus size={16} /> 상세 추가
-        </button>
-      </div>
+      <button onClick={onAddClick} className="cp-btn-primary">
+        <Plus size={16} /> 상세 추가
+      </button>
     </div>
   )
 }
@@ -1402,16 +1413,35 @@ function QuickAddBar({ onAdd, groups }) {
 
 const STATUS_SELECT_CLS = {
   todo: 'text-ink-muted',
-  in_progress: 'text-accent-strong',
   done: 'text-success',
 }
 
-// 고밀도 리스트 뷰 — 한 줄 = 한 문제. 상태 셀렉트는 changeProblemStatus 공통 경로를
-// 타므로 Done 선택 시 복습 모달 흐름이 칸반 드래그와 동일하게 동작한다.
+// 고밀도 리스트 뷰 — 한 줄 = 한 문제. 상태 셀렉트는 changeProblemStatus 공통 경로.
 // 그룹 없는 문제 섹션의 접기 상태 키 — 그룹 이름과 충돌하지 않는 예약 문자열
 const UNGROUPED_KEY = '__cplog_ungrouped__'
+const problemDragPayload = 'text/cplog-problems'
 
-function ProblemTable({ problems, onEdit, onDelete, onStatusChange, collapsedGroups, onToggleGroup, onRenameGroup, onClearGroup }) {
+function ProblemTable({
+  problems,
+  onEdit,
+  onDelete,
+  onStatusChange,
+  collapsedGroups,
+  onToggleGroup,
+  onRenameGroup,
+  onClearGroup,
+  onGroupProblems,
+  onSetProblemsGroup,
+  onMergeOntoProblem,
+  onDeleteProblems,
+}) {
+  // 다중 선택(클릭/Shift-범위/Ctrl-토글) + 우클릭 메뉴 + 그룹 드래그
+  const [selected, setSelected] = useState(() => new Set())
+  const anchorRef = useRef(null)
+  const [menu, setMenu] = useState(null) // null | {x, y}
+  const [dropKey, setDropKey] = useState(null) // 'prob:<id>' | 'group:<key>'
+  const clear = () => setSelected(new Set())
+
   const sortRows = (arr) =>
     [...arr].sort((a, b) => (STATUS_ORDER[a.status] ?? 1) - (STATUS_ORDER[b.status] ?? 1) || (b.createdAt || 0) - (a.createdAt || 0))
 
@@ -1432,123 +1462,330 @@ function ProblemTable({ problems, onEdit, onDelete, onStatusChange, collapsedGro
     ? [...named, ...(byGroup.has('') ? [{ key: UNGROUPED_KEY, name: '그룹 없음', rows: sortRows(byGroup.get('')), named: false }] : [])]
     : [{ key: null, rows: sortRows(problems) }]
 
-  const renderRow = (p) => (
-              <tr key={p.id} className={cn('group border-b border-border/60 hover:bg-surface-alt/50', p.status === 'done' && 'opacity-55')}>
-                <td className="py-1 pr-3">
-                  <select
-                    value={p.status}
-                    onChange={(e) => onStatusChange(p.id, e.target.value)}
-                    className={cn(
-                      'w-full cursor-pointer rounded-md border border-transparent bg-transparent py-1 text-xs font-semibold outline-none hover:border-border',
-                      STATUS_SELECT_CLS[p.status],
-                    )}
-                  >
-                    {COLUMNS.map((c) => (
-                      <option key={c.key} value={c.key}>
-                        {c.label}
-                      </option>
-                    ))}
-                  </select>
-                </td>
-                <td className="py-1 pr-3">
-                  <span className="flex items-center gap-1.5">
-                    <span className="font-medium text-ink">{p.name}</span>
-                    {p.url && (
-                      <a href={p.url} target="_blank" rel="noreferrer" className="shrink-0 text-ink-faint hover:text-accent">
-                        <ExternalLink size={12} />
-                      </a>
-                    )}
-                  </span>
-                </td>
-                <td className="py-1 pr-3">
-                  <span className={cn('rounded-md px-1.5 py-0.5 text-[11px] font-medium', PLATFORM_BADGE[p.platform] || PLATFORM_BADGE.Other)}>
-                    {p.platform}
-                  </span>
-                </td>
-                <td className="py-1 pr-3">
-                  <DifficultyBadge difficulty={p.difficulty} />
-                </td>
-                <td className="py-1 pr-3">
-                  <div className="flex flex-wrap gap-1">
-                    {p.tags?.map((t) => (
-                      <TagChip key={t}>{t}</TagChip>
-                    ))}
-                  </div>
-                </td>
-                <td className="py-1">
-                  <div className="flex justify-end gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
-                    <button onClick={() => onEdit(p)} className="rounded p-1 text-ink-faint hover:bg-surface-alt hover:text-ink">
-                      <Pencil size={13} />
-                    </button>
-                    <button onClick={() => onDelete(p)} className="rounded p-1 text-ink-faint hover:bg-danger-soft hover:text-danger">
-                      <Trash2 size={13} />
-                    </button>
-                  </div>
-                </td>
-              </tr>
-  )
+  // Shift-범위 선택을 위한 보이는(펼쳐진 섹션) 행들의 평면 순서
+  const flatIds = []
+  for (const sec of sections) {
+    if (sec.key === null || !collapsedGroups.includes(sec.key)) for (const p of sec.rows) flatIds.push(p.id)
+  }
+
+  const selectRow = (e, id) => {
+    if (e.shiftKey && anchorRef.current != null) {
+      const a = flatIds.indexOf(anchorRef.current)
+      const b = flatIds.indexOf(id)
+      if (a !== -1 && b !== -1) {
+        const [lo, hi] = a <= b ? [a, b] : [b, a]
+        setSelected(new Set(flatIds.slice(lo, hi + 1)))
+      }
+    } else if (e.ctrlKey || e.metaKey) {
+      setSelected((s) => {
+        const n = new Set(s)
+        n.has(id) ? n.delete(id) : n.add(id)
+        return n
+      })
+      anchorRef.current = id
+    } else {
+      setSelected(new Set([id]))
+      anchorRef.current = id
+    }
+  }
+
+  const hasDrag = (e) => [...e.dataTransfer.types].includes(problemDragPayload)
+  const parseIds = (e) => {
+    try {
+      return JSON.parse(e.dataTransfer.getData(problemDragPayload))
+    } catch {
+      return null
+    }
+  }
+
+  // 컨텍스트 메뉴는 외부 클릭/Esc/스크롤로 닫기
+  useEffect(() => {
+    if (!menu) return
+    const close = () => setMenu(null)
+    const onKey = (e) => e.key === 'Escape' && setMenu(null)
+    window.addEventListener('click', close)
+    window.addEventListener('keydown', onKey)
+    window.addEventListener('scroll', close, true)
+    return () => {
+      window.removeEventListener('click', close)
+      window.removeEventListener('keydown', onKey)
+      window.removeEventListener('scroll', close, true)
+    }
+  }, [menu])
+
+  const runMenu = (fn) => () => {
+    fn()
+    setMenu(null)
+    clear()
+  }
+
+  const renderRow = (p) => {
+    const isSel = selected.has(p.id)
+    return (
+      <tr
+        key={p.id}
+        draggable
+        onDragStart={(e) => {
+          const ids = isSel ? [...selected] : [p.id]
+          if (!isSel) {
+            setSelected(new Set([p.id]))
+            anchorRef.current = p.id
+          }
+          e.dataTransfer.setData(problemDragPayload, JSON.stringify(ids))
+          e.dataTransfer.effectAllowed = 'move'
+        }}
+        onDragOver={(e) => {
+          if (hasDrag(e)) {
+            e.preventDefault()
+            setDropKey(`prob:${p.id}`)
+          }
+        }}
+        onDragLeave={() => setDropKey((k) => (k === `prob:${p.id}` ? null : k))}
+        onDrop={(e) => {
+          e.stopPropagation()
+          setDropKey(null)
+          const ids = parseIds(e)
+          if (ids) {
+            onMergeOntoProblem(ids, p)
+            clear()
+          }
+        }}
+        onClick={(e) => selectRow(e, p.id)}
+        onContextMenu={(e) => {
+          e.preventDefault()
+          if (!isSel) {
+            setSelected(new Set([p.id]))
+            anchorRef.current = p.id
+          }
+          setMenu({ x: e.clientX, y: e.clientY })
+        }}
+        className={cn(
+          'group cursor-pointer select-none border-b border-border/60',
+          isSel ? 'bg-accent-soft' : 'hover:bg-surface-alt/50',
+          dropKey === `prob:${p.id}` && 'outline-dashed outline-1 -outline-offset-1 outline-accent',
+          p.status === 'done' && !isSel && 'opacity-55',
+        )}
+      >
+        <td className="py-1 pr-3">
+          <select
+            value={p.status}
+            onClick={(e) => e.stopPropagation()}
+            onChange={(e) => onStatusChange(p.id, e.target.value)}
+            className={cn(
+              'w-full cursor-pointer rounded-md border border-transparent bg-transparent py-1 text-xs font-semibold outline-none hover:border-border',
+              STATUS_SELECT_CLS[p.status],
+            )}
+          >
+            {COLUMNS.map((c) => (
+              <option key={c.key} value={c.key}>
+                {c.label}
+              </option>
+            ))}
+          </select>
+        </td>
+        <td className="py-1 pr-3">
+          <span className="flex items-center gap-1.5">
+            <span className="font-medium text-ink">{p.name}</span>
+            {p.url && (
+              <a
+                href={p.url}
+                target="_blank"
+                rel="noreferrer"
+                onClick={(e) => e.stopPropagation()}
+                className="shrink-0 text-ink-faint hover:text-accent"
+              >
+                <ExternalLink size={12} />
+              </a>
+            )}
+          </span>
+        </td>
+        <td className="py-1 pr-3">
+          <span className={cn('rounded-md px-1.5 py-0.5 text-[11px] font-medium', PLATFORM_BADGE[p.platform] || PLATFORM_BADGE.Other)}>
+            {p.platform}
+          </span>
+        </td>
+        <td className="py-1 pr-3">
+          <DifficultyBadge difficulty={p.difficulty} />
+        </td>
+        <td className="py-1 pr-3">
+          <div className="flex flex-wrap gap-1">
+            {p.tags?.map((t) => (
+              <TagChip key={t}>{t}</TagChip>
+            ))}
+          </div>
+        </td>
+        <td className="py-1">
+          <div className="flex justify-end gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+            <button
+              onClick={(e) => {
+                e.stopPropagation()
+                onEdit(p)
+              }}
+              className="rounded p-1 text-ink-faint hover:bg-surface-alt hover:text-ink"
+            >
+              <Pencil size={13} />
+            </button>
+            <button
+              onClick={(e) => {
+                e.stopPropagation()
+                onDelete(p)
+              }}
+              className="rounded p-1 text-ink-faint hover:bg-danger-soft hover:text-danger"
+            >
+              <Trash2 size={13} />
+            </button>
+          </div>
+        </td>
+      </tr>
+    )
+  }
 
   return (
-    <div className="flex-1 overflow-y-auto px-6 pb-6 pt-2">
+    <div className="flex-1 overflow-y-auto px-6 pb-6 pt-2" onClick={(e) => e.target === e.currentTarget && clear()}>
       {problems.length === 0 ? (
         <p className="rounded-lg border border-dashed border-border py-10 text-center text-xs text-ink-faint">
           문제가 없습니다 — 위 입력창에 링크를 붙여넣어 보세요
         </p>
       ) : (
-        <table className="w-full border-collapse text-[13px]">
-          <thead>
-            <tr className="border-b border-border text-left text-[10.5px] uppercase tracking-wide text-ink-faint">
-              <th className="w-32 py-2 pr-3 font-semibold">상태</th>
-              <th className="py-2 pr-3 font-semibold">문제</th>
-              <th className="w-24 py-2 pr-3 font-semibold">플랫폼</th>
-              <th className="w-16 py-2 pr-3 font-semibold">난이도</th>
-              <th className="w-56 py-2 pr-3 font-semibold">태그</th>
-              <th className="w-14 py-2" />
-            </tr>
-          </thead>
-          {sections.map((sec) => {
-            const open = sec.key === null || !collapsedGroups.includes(sec.key)
-            const done = sec.rows.filter((p) => p.status === 'done').length
-            return (
-              <tbody key={sec.key ?? '__all__'}>
-                {sec.key !== null && (
-                  <tr className="group/sec">
-                    <td colSpan={6} className="pb-1 pt-4">
-                      <div className="flex items-center gap-2">
-                        <button onClick={() => onToggleGroup(sec.key)} className="flex min-w-0 items-center gap-1.5 text-left">
-                          <ChevronRight size={13} className={cn('shrink-0 text-ink-faint transition-transform', open && 'rotate-90')} />
-                          <span className="truncate text-[13px] font-bold text-ink">{sec.name}</span>
-                        </button>
-                        <span className={cn('shrink-0 font-mono text-[11px]', done === sec.rows.length ? 'text-success' : 'text-ink-faint')}>
-                          {done}/{sec.rows.length} 해결
-                        </span>
-                        {sec.named && (
-                          <span className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover/sec:opacity-100">
-                            <button
-                              onClick={() => onRenameGroup(sec.name)}
-                              title="그룹 이름 변경"
-                              className="rounded p-1 text-ink-faint hover:bg-surface-alt hover:text-ink"
-                            >
-                              <Pencil size={11} />
-                            </button>
-                            <button
-                              onClick={() => onClearGroup(sec.name)}
-                              title="그룹 해제 — 문제는 '그룹 없음'으로 이동"
-                              className="rounded p-1 text-ink-faint hover:bg-danger-soft hover:text-danger"
-                            >
-                              <X size={12} />
-                            </button>
+        <>
+          {selected.size > 0 && (
+            <div className="sticky top-0 z-10 mb-2 flex flex-wrap items-center gap-2 rounded-lg border border-accent/40 bg-accent-soft px-3 py-1.5 text-xs">
+              <span className="font-semibold text-accent-strong">{selected.size}개 선택</span>
+              <button
+                onClick={() => {
+                  onGroupProblems([...selected])
+                  clear()
+                }}
+                className="flex items-center gap-1 rounded-md border border-border bg-surface px-2 py-1 font-medium text-ink hover:border-accent"
+              >
+                <FolderPlus size={12} /> 새 그룹으로 묶기
+              </button>
+              <button
+                onClick={() => {
+                  onSetProblemsGroup([...selected], '')
+                  clear()
+                }}
+                className="rounded-md border border-border bg-surface px-2 py-1 font-medium text-ink hover:border-accent"
+              >
+                그룹에서 빼기
+              </button>
+              <button
+                onClick={() => {
+                  onDeleteProblems([...selected])
+                  clear()
+                }}
+                className="rounded-md border border-border bg-surface px-2 py-1 font-medium text-danger hover:bg-danger-soft"
+              >
+                삭제
+              </button>
+              <span className="ml-auto text-[10.5px] text-ink-muted">드래그로 그룹에 넣기 · 우클릭 메뉴</span>
+              <button onClick={clear} className="rounded p-0.5 text-ink-faint hover:text-ink">
+                <X size={13} />
+              </button>
+            </div>
+          )}
+          <table className="w-full border-collapse text-[13px]">
+            <thead>
+              <tr className="border-b border-border text-left text-[10.5px] uppercase tracking-wide text-ink-faint">
+                <th className="w-32 py-2 pr-3 font-semibold">상태</th>
+                <th className="py-2 pr-3 font-semibold">문제</th>
+                <th className="w-24 py-2 pr-3 font-semibold">플랫폼</th>
+                <th className="w-16 py-2 pr-3 font-semibold">난이도</th>
+                <th className="w-56 py-2 pr-3 font-semibold">태그</th>
+                <th className="w-14 py-2" />
+              </tr>
+            </thead>
+            {sections.map((sec) => {
+              const open = sec.key === null || !collapsedGroups.includes(sec.key)
+              const done = sec.rows.filter((p) => p.status === 'done').length
+              const isDropSec = dropKey === `group:${sec.key}`
+              return (
+                <tbody key={sec.key ?? '__all__'}>
+                  {sec.key !== null && (
+                    <tr
+                      className="group/sec"
+                      onDragOver={(e) => {
+                        if (hasDrag(e)) {
+                          e.preventDefault()
+                          setDropKey(`group:${sec.key}`)
+                        }
+                      }}
+                      onDragLeave={() => setDropKey((k) => (k === `group:${sec.key}` ? null : k))}
+                      onDrop={(e) => {
+                        e.stopPropagation()
+                        setDropKey(null)
+                        const ids = parseIds(e)
+                        if (ids) {
+                          onSetProblemsGroup(ids, sec.named ? sec.name : '')
+                          clear()
+                        }
+                      }}
+                    >
+                      <td colSpan={6} className={cn('rounded-md pb-1 pt-4', isDropSec && 'bg-accent-soft outline-dashed outline-1 outline-accent')}>
+                        <div className="flex items-center gap-2">
+                          <button onClick={() => onToggleGroup(sec.key)} className="flex min-w-0 items-center gap-1.5 text-left">
+                            <ChevronRight size={13} className={cn('shrink-0 text-ink-faint transition-transform', open && 'rotate-90')} />
+                            <span className="truncate text-[13px] font-bold text-ink">{sec.name}</span>
+                          </button>
+                          <span className={cn('shrink-0 font-mono text-[11px]', done === sec.rows.length ? 'text-success' : 'text-ink-faint')}>
+                            {done}/{sec.rows.length} 해결
                           </span>
-                        )}
-                      </div>
-                    </td>
-                  </tr>
-                )}
-                {open && sec.rows.map(renderRow)}
-              </tbody>
-            )
-          })}
-        </table>
+                          {sec.named && (
+                            <span className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover/sec:opacity-100">
+                              <button
+                                onClick={() => onRenameGroup(sec.name)}
+                                title="그룹 이름 변경"
+                                className="rounded p-1 text-ink-faint hover:bg-surface-alt hover:text-ink"
+                              >
+                                <Pencil size={11} />
+                              </button>
+                              <button
+                                onClick={() => onClearGroup(sec.name)}
+                                title="그룹 해제 — 문제는 '그룹 없음'으로 이동"
+                                className="rounded p-1 text-ink-faint hover:bg-danger-soft hover:text-danger"
+                              >
+                                <X size={12} />
+                              </button>
+                            </span>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                  {open && sec.rows.map(renderRow)}
+                </tbody>
+              )
+            })}
+          </table>
+        </>
+      )}
+
+      {menu && (
+        <div
+          className="fixed z-50 min-w-48 overflow-hidden rounded-lg border border-border bg-surface py-1 text-[13px] shadow-xl"
+          style={{ left: menu.x, top: menu.y }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <button
+            onClick={runMenu(() => onGroupProblems([...selected]))}
+            className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-ink hover:bg-surface-alt"
+          >
+            <FolderPlus size={13} /> 새 그룹으로 묶기 ({selected.size}개)
+          </button>
+          <button
+            onClick={runMenu(() => onSetProblemsGroup([...selected], ''))}
+            className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-ink hover:bg-surface-alt"
+          >
+            <X size={13} /> 그룹에서 빼기
+          </button>
+          <div className="my-1 border-t border-border" />
+          <button
+            onClick={runMenu(() => onDeleteProblems([...selected]))}
+            className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-danger hover:bg-danger-soft"
+          >
+            <Trash2 size={13} /> 삭제 ({selected.size}개)
+          </button>
+        </div>
       )}
     </div>
   )
@@ -1584,7 +1821,7 @@ function ReviewStrip({ problems, onRetry, onComplete }) {
               <span className={cn('font-mono text-[10.5px]', due ? 'font-bold' : 'text-ink-faint')}>{label}</span>
               <button
                 onClick={() => onRetry(p)}
-                title="다시 풀기 (In Progress로 이동)"
+                title="다시 풀기 (To Do로 이동)"
                 className="rounded-full p-1 opacity-60 hover:bg-black/10 hover:opacity-100"
               >
                 <RotateCcw size={12} />
@@ -1600,74 +1837,10 @@ function ReviewStrip({ problems, onRetry, onComplete }) {
   )
 }
 
-function KanbanColumns({ problems, onEdit, onDelete, onStatusChange }) {
-  const [dragId, setDragId] = useState(null)
-  const [overCol, setOverCol] = useState(null)
-
-  const handleDrop = (colKey) => {
-    if (dragId != null) onStatusChange(dragId, colKey)
-    setDragId(null)
-    setOverCol(null)
-  }
-
-  return (
-    <div className="flex flex-1 gap-4 overflow-x-auto p-6 pt-4">
-        {COLUMNS.map((col) => {
-          const items = problems.filter((p) => p.status === col.key)
-          return (
-            <div
-              key={col.key}
-              onDragOver={(e) => {
-                e.preventDefault()
-                setOverCol(col.key)
-              }}
-              onDragLeave={() => setOverCol((c) => (c === col.key ? null : c))}
-              onDrop={() => handleDrop(col.key)}
-              className={cn(
-                'flex w-80 shrink-0 flex-col rounded-xl bg-surface-alt/60 p-3 transition-colors',
-                overCol === col.key && 'cp-column-droptarget',
-              )}
-            >
-              <div className="mb-3 flex items-center justify-between px-1">
-                <div>
-                  <h3 className="text-sm font-bold text-ink">{col.label}</h3>
-                  <p className="text-[11px] text-ink-faint">{col.hint}</p>
-                </div>
-                <span className="rounded-full bg-surface px-2 py-0.5 text-xs font-semibold text-ink-muted">{items.length}</span>
-              </div>
-              <div className="flex flex-1 flex-col gap-2">
-                {items.map((p) => (
-                  <div key={p.id} className={dragId === p.id ? 'cp-card-dragging' : ''}>
-                    <ProblemCard
-                      problem={p}
-                      onEdit={onEdit}
-                      onDelete={onDelete}
-                      onDragStart={(e, prob) => {
-                        e.dataTransfer.setData('text/plain', prob.id)
-                        e.dataTransfer.effectAllowed = 'move'
-                        setDragId(prob.id)
-                      }}
-                      onDragEnd={() => setDragId(null)}
-                    />
-                  </div>
-                ))}
-                {items.length === 0 && (
-                  <p className="rounded-lg border border-dashed border-border py-6 text-center text-xs text-ink-faint">문제가 없습니다</p>
-                )}
-              </div>
-            </div>
-          )
-        })}
-    </div>
-  )
-}
-
-// To Solve 화면 전체 — 헤더(뷰 토글) + 캡처 바 + 복습 스트립 + 리스트/칸반 뷰
+// To Solve 화면 전체 — 헤더 + 캡처 바 + 복습 스트립 + 고밀도 리스트
 function ProblemBoard({
   problems,
   groups,
-  boardMode,
-  onSetBoardMode,
   onAddClick,
   onQuickAdd,
   onEdit,
@@ -1679,26 +1852,30 @@ function ProblemBoard({
   onToggleGroup,
   onRenameGroup,
   onClearGroup,
+  onGroupProblems,
+  onSetProblemsGroup,
+  onMergeOntoProblem,
+  onDeleteProblems,
 }) {
   return (
     <div className="flex h-full flex-col">
-      <BoardHeader count={problems.length} onAddClick={onAddClick} boardMode={boardMode} onSetBoardMode={onSetBoardMode} />
+      <BoardHeader count={problems.length} onAddClick={onAddClick} />
       <QuickAddBar onAdd={onQuickAdd} groups={groups} />
       <ReviewStrip problems={problems} onRetry={onReviewRetry} onComplete={onReviewComplete} />
-      {boardMode === 'kanban' ? (
-        <KanbanColumns problems={problems} onEdit={onEdit} onDelete={onDelete} onStatusChange={onStatusChange} />
-      ) : (
-        <ProblemTable
-          problems={problems}
-          onEdit={onEdit}
-          onDelete={onDelete}
-          onStatusChange={onStatusChange}
-          collapsedGroups={collapsedGroups}
-          onToggleGroup={onToggleGroup}
-          onRenameGroup={onRenameGroup}
-          onClearGroup={onClearGroup}
-        />
-      )}
+      <ProblemTable
+        problems={problems}
+        onEdit={onEdit}
+        onDelete={onDelete}
+        onStatusChange={onStatusChange}
+        collapsedGroups={collapsedGroups}
+        onToggleGroup={onToggleGroup}
+        onRenameGroup={onRenameGroup}
+        onClearGroup={onClearGroup}
+        onGroupProblems={onGroupProblems}
+        onSetProblemsGroup={onSetProblemsGroup}
+        onMergeOntoProblem={onMergeOntoProblem}
+        onDeleteProblems={onDeleteProblems}
+      />
     </div>
   )
 }
@@ -2975,7 +3152,7 @@ function StatTile({ label, value, sub }) {
 
 function StatsView({ problems, notes }) {
   const doneCount = problems.filter((p) => p.status === 'done').length
-  const inProgressCount = problems.filter((p) => p.status === 'in_progress').length
+  const todoCount = problems.filter((p) => p.status !== 'done').length
 
   // 일별 활동 = 그날 해결한 문제(solvedAt) + 그날 만든 노트(createdAt)
   const activity = useMemo(() => {
@@ -3043,7 +3220,7 @@ function StatsView({ problems, notes }) {
         <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
           <StatTile label="추적 중인 문제" value={problems.length} />
           <StatTile label="해결 (Done)" value={doneCount} sub={problems.length ? `${Math.round((doneCount / problems.length) * 100)}%` : null} />
-          <StatTile label="진행 중 · 업솔빙" value={inProgressCount} />
+          <StatTile label="미해결 (To Do)" value={todoCount} />
           <StatTile label="작성한 노트" value={notes.length} />
         </div>
 
@@ -3381,7 +3558,6 @@ export default function App() {
   } = useGithubSync({ settings: gh, notes, setNotes, problems, setProblems, snippets, setSnippets, folders, setFolders, addToast })
 
   const activeNote = notes.find((n) => n.id === uiState.activeNoteId) || null
-  const boardMode = uiState.boardMode || 'list' // 예전 저장분에는 키가 없음 → 리스트 기본
   const navigate = (view) => setUiState((s) => ({ ...s, activeView: view }))
   const toggleSidebarCollapsed = () => setUiState((s) => ({ ...s, sidebarCollapsed: !s.sidebarCollapsed }))
   const setEditorMode = (mode) => setUiState((s) => ({ ...s, editorMode: mode }))
@@ -3421,7 +3597,7 @@ export default function App() {
   }
 
   const retryReviewProblem = (problem) => {
-    setProblems((prev) => prev.map((p) => (p.id === problem.id ? { ...p, status: 'in_progress', reviewAt: null } : p)))
+    setProblems((prev) => prev.map((p) => (p.id === problem.id ? { ...p, status: 'todo', reviewAt: null } : p)))
     markDirty('problems.json')
   }
 
@@ -3431,6 +3607,15 @@ export default function App() {
   }
 
   const reviewDueCount = problems.filter((p) => p.reviewAt != null && Date.now() >= p.reviewAt).length
+
+  // In Progress 상태 폐지(2026-07-13) — 로컬/원격에 남은 값은 To Do로 승격
+  useEffect(() => {
+    if (problems.some((p) => p.status === 'in_progress')) {
+      setProblems((prev) => prev.map((p) => (p.status === 'in_progress' ? { ...p, status: 'todo' } : p)))
+      markDirty('problems.json')
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [problems])
 
   // --- 폴더 (에디터 노트 트리) ---
 
@@ -3462,10 +3647,14 @@ export default function App() {
     markDirty('folders.json')
   }
 
-  const moveNoteToFolder = (noteId, folderId) => {
-    const note = notes.find((n) => n.id === noteId)
-    if (!note || (note.folderId ?? null) === (folderId ?? null)) return
-    updateNote(noteId, { folderId: folderId ?? null })
+  // 노트(단일/다중)를 폴더로 이동 — 드롭 페이로드는 항상 id 배열
+  const moveNotesToFolder = (ids, folderId) => {
+    const target = folderId ?? null
+    const toMove = notes.filter((n) => ids.includes(n.id) && (n.folderId ?? null) !== target)
+    if (!toMove.length) return
+    const idSet = new Set(toMove.map((n) => n.id))
+    setNotes((prev) => prev.map((n) => (idSet.has(n.id) ? { ...n, folderId: target, updatedAt: Date.now() } : n)))
+    for (const n of toMove) markDirty(`notes/${n.id}.md`)
   }
 
   // --- 그룹 (문제집) ---
@@ -3488,6 +3677,39 @@ export default function App() {
   const clearProblemGroup = (name) => {
     if (!window.confirm(`"${name}" 그룹을 해제할까요?\n문제는 삭제되지 않고 '그룹 없음'으로 이동합니다.`)) return
     setProblems((prev) => prev.map((p) => (p.group === name ? { ...p, group: '' } : p)))
+    markDirty('problems.json')
+  }
+
+  // 선택한 문제들을 특정 그룹으로(또는 ''=그룹 없음으로) 이동
+  const setProblemsGroup = (ids, group) => {
+    const idSet = new Set(ids)
+    setProblems((prev) => prev.map((p) => (idSet.has(p.id) ? { ...p, group } : p)))
+    markDirty('problems.json')
+  }
+
+  // 선택한 문제들로 새 그룹 생성 — 이름은 '새 그룹'(중복 시 '새 그룹 2'…), 나중에 연필로 수정
+  const createGroupFromProblems = (ids) => {
+    if (!ids.length) return
+    const used = new Set(problems.map((p) => p.group).filter(Boolean))
+    let name = '새 그룹'
+    for (let i = 2; used.has(name); i++) name = `새 그룹 ${i}`
+    setProblemsGroup(ids, name)
+    addToast('success', `${ids.length}개 문제를 "${name}"으로 묶었습니다.`)
+  }
+
+  // 문제 위로 드롭(합치기) — 대상이 그룹에 속하면 그 그룹으로, 아니면 대상+드래그로 새 그룹 생성
+  const mergeOntoProblem = (ids, target) => {
+    const dragged = ids.filter((id) => id !== target.id)
+    if (!dragged.length) return
+    if (target.group) setProblemsGroup(dragged, target.group)
+    else createGroupFromProblems([target.id, ...dragged])
+  }
+
+  const deleteProblems = (ids) => {
+    if (!ids.length) return
+    if (!window.confirm(`선택한 ${ids.length}개 문제를 삭제할까요?`)) return
+    const idSet = new Set(ids)
+    setProblems((prev) => prev.filter((p) => !idSet.has(p.id)))
     markDirty('problems.json')
   }
 
@@ -3932,7 +4154,7 @@ export default function App() {
         collapsedFolders={collapsedFolders}
         folderActions={{
           onToggleFolder: toggleFolder,
-          onMoveNote: moveNoteToFolder,
+          onMoveNotes: moveNotesToFolder,
           onNewNoteInFolder: requestNewNoteInFolder,
           onEditFolder: setFolderModal,
           onDeleteFolder: deleteFolder,
@@ -3955,8 +4177,6 @@ export default function App() {
           <ProblemBoard
             problems={problems}
             groups={problemGroups}
-            boardMode={boardMode}
-            onSetBoardMode={(mode) => setUiState((s) => ({ ...s, boardMode: mode }))}
             onAddClick={() => setProblemModal({})}
             onQuickAdd={quickAddProblems}
             onEdit={(p) => setProblemModal(p)}
@@ -3968,6 +4188,10 @@ export default function App() {
             onToggleGroup={toggleProblemGroup}
             onRenameGroup={renameProblemGroup}
             onClearGroup={clearProblemGroup}
+            onGroupProblems={createGroupFromProblems}
+            onSetProblemsGroup={setProblemsGroup}
+            onMergeOntoProblem={mergeOntoProblem}
+            onDeleteProblems={deleteProblems}
           />
         ) : (
           <EditorView
