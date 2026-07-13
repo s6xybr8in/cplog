@@ -38,8 +38,11 @@ import {
   CalendarPlus,
   Link2,
   ChartColumn,
+  Folder,
+  FolderPlus,
+  ChevronRight,
 } from 'lucide-react'
-import ReactMarkdown from 'react-markdown'
+import ReactMarkdown, { defaultUrlTransform } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
@@ -61,6 +64,7 @@ import { languages } from '@codemirror/language-data'
 const LS_KEYS = {
   PROBLEMS: 'cplog_problems',
   NOTES: 'cplog_notes',
+  FOLDERS: 'cplog_folders',
   SNIPPETS: 'cplog_snippets',
   GITHUB: 'cplog_github_settings',
   UI: 'cplog_ui_state',
@@ -99,6 +103,19 @@ const COLUMNS = [
 const STATUS_ORDER = { in_progress: 0, todo: 1, done: 2 }
 
 const TAG_SUGGESTIONS = ['DP', '그리디', '그래프', '이분탐색', '수론', 'BFS/DFS', '자료구조', '문자열', '구현']
+
+// 폴더 색상 프리셋 — 다크/라이트 양쪽에서 읽히는 500 계열 고정 hue
+const FOLDER_COLORS = {
+  red: '#ef4444',
+  orange: '#f97316',
+  amber: '#f59e0b',
+  green: '#22c55e',
+  teal: '#14b8a6',
+  blue: '#3b82f6',
+  violet: '#8b5cf6',
+  pink: '#ec4899',
+}
+const FOLDER_EMOJI_PRESETS = ['📁', '🏆', '📚', '🔥', '💡', '🎯', '⚡', '📝']
 
 const DAY_MS = 86400000
 
@@ -234,15 +251,8 @@ function parseProblemLine(line) {
   return { name, url, platform: parsed?.platform || 'Other' }
 }
 
-function buildTemplate(problem) {
+function buildTemplate() {
   const lines = []
-  if (problem) {
-    lines.push('## 문제 정보', '')
-    lines.push(`- **문제**: [${problem.name}](${problem.url || '#'})`)
-    lines.push(`- **플랫폼**: ${problem.platform}${problem.difficulty ? ` (${problem.difficulty})` : ''}`)
-    lines.push(`- **태그**: ${(problem.tags || []).join(', ') || '-'}`)
-    lines.push('', '---', '')
-  }
   lines.push(
     '## 접근 방식 (핵심 알고리즘)',
     '',
@@ -280,21 +290,25 @@ const DEFAULT_SNIPPETS = [
   {
     id: 'default-ps-template',
     name: 'PS 풀이 템플릿',
-    content: buildTemplate(null),
+    content: buildTemplate(),
     createdAt: Date.now(),
     updatedAt: Date.now(),
   },
 ]
 
-// {{date}}/{{time}}/{{datetime}}/{{title}} 치환 후 {{cursor}} 위치(제거됨)를 반환
-function renderSnippet(content, { title } = {}) {
+// {{date}}/{{time}}/{{datetime}} 치환 — 스니펫 본문/제목 템플릿 공용
+function renderSnippetVars(text) {
   const now = new Date()
   const time = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`
-  let text = (content || '')
+  return (text || '')
     .replaceAll('{{date}}', formatDate(now))
     .replaceAll('{{time}}', time)
     .replaceAll('{{datetime}}', formatDateTime(now.getTime()))
-    .replaceAll('{{title}}', title || '')
+}
+
+// 본문 치환: 변수 + {{title}}, {{cursor}} 위치(제거됨)를 반환
+function renderSnippet(content, { title } = {}) {
+  let text = renderSnippetVars(content).replaceAll('{{title}}', title || '')
   const cursorIdx = text.indexOf('{{cursor}}')
   text = text.replaceAll('{{cursor}}', '')
   return { text, cursorOffset: cursorIdx === -1 ? text.length : cursorIdx }
@@ -346,7 +360,7 @@ function ghFetch(pat, path, opts = {}) {
 
 // 노트 <-> 마크다운 파일 직렬화. front matter 값은 JSON 리터럴(YAML의 부분집합)로
 // 기록해 라인 단위 JSON.parse만으로 무손실 왕복이 가능하고 Obsidian에서도 읽힌다.
-const NOTE_META_FIELDS = ['id', 'problemId', 'title', 'category', 'tags', 'createdAt', 'updatedAt', 'published', 'publishedPath']
+const NOTE_META_FIELDS = ['id', 'problemId', 'title', 'category', 'tags', 'folderId', 'createdAt', 'updatedAt', 'published', 'publishedPath']
 
 function noteToMarkdown(note) {
   const lines = ['---']
@@ -376,6 +390,7 @@ function markdownToNote(text) {
     title: '',
     category: '',
     tags: [],
+    folderId: null,
     createdAt: Date.now(),
     updatedAt: Date.now(),
     published: false,
@@ -386,7 +401,7 @@ function markdownToNote(text) {
 }
 
 // 스니펫 <-> 마크다운 직렬화 — 노트와 동일한 front matter(JSON 리터럴) 패턴
-const SNIPPET_META_FIELDS = ['id', 'name', 'createdAt', 'updatedAt']
+const SNIPPET_META_FIELDS = ['id', 'name', 'title', 'createdAt', 'updatedAt']
 
 function snippetToMarkdown(snippet) {
   const lines = ['---']
@@ -413,6 +428,7 @@ function markdownToSnippet(text) {
   if (!meta.id) return null
   return {
     name: '',
+    title: '',
     createdAt: Date.now(),
     updatedAt: Date.now(),
     ...meta,
@@ -448,7 +464,7 @@ function useLocalStorageState(key, initialValue) {
 
 // ---------------------------------------------------------------------------
 // GitHub 데이터 리포 동기화 엔진
-// problems.json + notes/<id>.md 를 별도 private 리포에 Pull/Push.
+// problems.json + folders.json + notes/<id>.md 를 별도 private 리포에 Pull/Push.
 // PAT·설정·테마는 동기화 대상에서 제외 (절대 리포에 올리지 않음).
 // ---------------------------------------------------------------------------
 
@@ -464,7 +480,7 @@ const isNotePath = (path) => path.startsWith('notes/') && path.endsWith('.md')
 const snippetIdFromPath = (path) => path.slice('snippets/'.length, -'.md'.length)
 const isSnippetPath = (path) => path.startsWith('snippets/') && path.endsWith('.md')
 
-function useGithubSync({ settings, notes, setNotes, problems, setProblems, snippets, setSnippets, addToast }) {
+function useGithubSync({ settings, notes, setNotes, problems, setProblems, snippets, setSnippets, folders, setFolders, addToast }) {
   const [syncMeta, setSyncMeta] = useLocalStorageState(LS_KEYS.SYNC, SYNC_META_DEFAULT)
   const [status, setStatus] = useState('off') // off | idle | dirty | syncing | error
 
@@ -486,6 +502,8 @@ function useGithubSync({ settings, notes, setNotes, problems, setProblems, snipp
   problemsRef.current = problems
   const snippetsRef = useRef(snippets)
   snippetsRef.current = snippets
+  const foldersRef = useRef(folders)
+  foldersRef.current = folders
   // path -> blob sha 맵의 단일 진실 공급원. pull/push가 직접 갱신하고 persist가
   // localStorage로 미러링한다 (React 상태 왕복에 기대면 pull 직후 push가 stale 맵을 읽음)
   const filesRef = useRef(null)
@@ -517,7 +535,7 @@ function useGithubSync({ settings, notes, setNotes, problems, setProblems, snipp
     if (!treeRes.ok) throw new Error((await safeJson(treeRes))?.message || `원격 목록 조회 실패 (${treeRes.status})`)
 
     const entries = ((await treeRes.json()).tree || []).filter(
-      (e) => e.type === 'blob' && (e.path === 'problems.json' || isNotePath(e.path) || isSnippetPath(e.path)),
+      (e) => e.type === 'blob' && (e.path === 'problems.json' || e.path === 'folders.json' || isNotePath(e.path) || isSnippetPath(e.path)),
     )
     const remoteShas = Object.fromEntries(entries.map((e) => [e.path, e.sha]))
     const files = { ...filesRef.current }
@@ -532,6 +550,13 @@ function useGithubSync({ settings, notes, setNotes, problems, setProblems, snipp
         try {
           const arr = JSON.parse(text)
           if (Array.isArray(arr)) setProblems(arr)
+        } catch {
+          continue
+        }
+      } else if (entry.path === 'folders.json') {
+        try {
+          const arr = JSON.parse(text)
+          if (Array.isArray(arr)) setFolders(arr)
         } catch {
           continue
         }
@@ -588,6 +613,7 @@ function useGithubSync({ settings, notes, setNotes, problems, setProblems, snipp
 
     // 첫 연결: 원격에 아직 없는 로컬 데이터는 push 대상으로 등록
     if (problemsRef.current.length && !remoteShas['problems.json']) dirtyRef.current.add('problems.json')
+    if (foldersRef.current.length && !remoteShas['folders.json']) dirtyRef.current.add('folders.json')
     for (const n of notesRef.current) {
       const p = `notes/${n.id}.md`
       if (!remoteShas[p] && !files[p] && !deleteRef.current.has(p)) dirtyRef.current.add(p)
@@ -599,7 +625,7 @@ function useGithubSync({ settings, notes, setNotes, problems, setProblems, snipp
 
     filesRef.current = files
     persist(files)
-  }, [ghData, setNotes, setProblems, setSnippets, persist])
+  }, [ghData, setNotes, setProblems, setSnippets, setFolders, persist])
 
   const push = useCallback(async () => {
     const branch = settingsRef.current.dataBranch?.trim() || 'main'
@@ -628,6 +654,8 @@ function useGithubSync({ settings, notes, setNotes, problems, setProblems, snipp
       let content
       if (path === 'problems.json') {
         content = JSON.stringify(problemsRef.current, null, 2)
+      } else if (path === 'folders.json') {
+        content = JSON.stringify(foldersRef.current, null, 2)
       } else if (isSnippetPath(path)) {
         const snippet = snippetsRef.current.find((s) => s.id === snippetIdFromPath(path))
         if (!snippet) {
@@ -858,6 +886,142 @@ function SyncIndicator({ status, lastSyncAt, collapsed, onClick }) {
   )
 }
 
+// 폴더 트리 헬퍼 — parentId 기반 중첩. 부모가 사라진 폴더(동기화 경합 등)는 루트로 승격해 잃지 않는다.
+function buildFolderTree(folders) {
+  const ids = new Set(folders.map((f) => f.id))
+  const byParent = new Map()
+  const sorted = [...folders].sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ko'))
+  for (const f of sorted) {
+    const parent = f.parentId && ids.has(f.parentId) ? f.parentId : null
+    if (!byParent.has(parent)) byParent.set(parent, [])
+    byParent.get(parent).push(f)
+  }
+  return byParent
+}
+
+const noteDragPayload = 'text/cplog-note'
+
+function SidebarNoteRow({ note, active, depth, onSelect, onDelete }) {
+  return (
+    <div
+      draggable
+      onDragStart={(e) => {
+        e.dataTransfer.setData(noteDragPayload, note.id)
+        e.dataTransfer.effectAllowed = 'move'
+      }}
+      className={cn('group mb-0.5 flex items-center gap-1 rounded-lg py-1 pr-1', active ? 'bg-accent-soft' : 'hover:bg-surface-alt')}
+      style={{ paddingLeft: 4 + depth * 14 }}
+    >
+      <button onClick={() => onSelect(note.id)} className="min-w-0 flex-1 rounded-lg px-1.5 py-1 text-left">
+        <p className={cn('truncate text-[12.5px] font-semibold', active ? 'text-accent-strong' : 'text-ink')}>{note.title || '제목 없음'}</p>
+        <p className="mt-0.5 flex items-center gap-1 text-[10.5px] text-ink-faint">
+          {note.published ? <CheckCircle2 size={10} className="text-success" /> : <Clock size={10} />}
+          {note.published ? '발행됨' : '초안'}
+        </p>
+      </button>
+      <button
+        onClick={() => onDelete(note.id)}
+        className="shrink-0 rounded p-1 text-ink-faint opacity-0 hover:bg-danger-soft hover:text-danger group-hover:opacity-100"
+      >
+        <Trash2 size={11} />
+      </button>
+    </div>
+  )
+}
+
+function FolderTreeNode({ folder, depth, byParent, notes, activeNoteId, collapsedFolders, actions }) {
+  const [dragOver, setDragOver] = useState(false)
+  const open = !collapsedFolders.includes(folder.id)
+  const childFolders = byParent.get(folder.id) || []
+  const childNotes = notes.filter((n) => n.folderId === folder.id)
+  const color = FOLDER_COLORS[folder.color]
+  return (
+    <div>
+      <div
+        onDragOver={(e) => {
+          if ([...e.dataTransfer.types].includes(noteDragPayload)) {
+            e.preventDefault()
+            setDragOver(true)
+          }
+        }}
+        onDragLeave={() => setDragOver(false)}
+        onDrop={(e) => {
+          e.stopPropagation()
+          setDragOver(false)
+          const id = e.dataTransfer.getData(noteDragPayload)
+          if (id) actions.onMoveNote(id, folder.id)
+        }}
+        className={cn(
+          'group mb-0.5 flex items-center gap-0.5 rounded-lg py-1 pr-1',
+          dragOver ? 'bg-accent-soft outline-dashed outline-1 outline-accent' : 'hover:bg-surface-alt',
+        )}
+        style={{ paddingLeft: 4 + depth * 14 }}
+      >
+        <button onClick={() => actions.onToggleFolder(folder.id)} className="flex min-w-0 flex-1 items-center gap-1.5 py-0.5 text-left">
+          <ChevronRight size={12} className={cn('shrink-0 text-ink-faint transition-transform', open && 'rotate-90')} />
+          {folder.emoji ? (
+            <span className="w-4 shrink-0 text-center text-[13px] leading-none">{folder.emoji}</span>
+          ) : (
+            <Folder size={14} className={cn('shrink-0', !color && 'text-ink-muted')} style={color ? { color } : undefined} />
+          )}
+          <span className={cn('min-w-0 flex-1 truncate text-[12.5px] font-semibold', !color && 'text-ink')} style={color ? { color } : undefined}>
+            {folder.name}
+          </span>
+        </button>
+        <span className="flex shrink-0 items-center opacity-0 group-hover:opacity-100">
+          <button
+            onClick={() => actions.onNewNoteInFolder(folder.id)}
+            title="이 폴더에 새 노트"
+            className="rounded p-1 text-ink-faint hover:bg-surface-alt hover:text-accent"
+          >
+            <Plus size={12} />
+          </button>
+          <button
+            onClick={() => actions.onEditFolder(folder)}
+            title="폴더 편집"
+            className="rounded p-1 text-ink-faint hover:bg-surface-alt hover:text-ink"
+          >
+            <Pencil size={11} />
+          </button>
+          <button
+            onClick={() => actions.onDeleteFolder(folder)}
+            title="폴더 삭제"
+            className="rounded p-1 text-ink-faint hover:bg-danger-soft hover:text-danger"
+          >
+            <Trash2 size={11} />
+          </button>
+        </span>
+      </div>
+      {open && (
+        <div>
+          {childFolders.map((f) => (
+            <FolderTreeNode
+              key={f.id}
+              folder={f}
+              depth={depth + 1}
+              byParent={byParent}
+              notes={notes}
+              activeNoteId={activeNoteId}
+              collapsedFolders={collapsedFolders}
+              actions={actions}
+            />
+          ))}
+          {childNotes.map((n) => (
+            <SidebarNoteRow
+              key={n.id}
+              note={n}
+              active={n.id === activeNoteId}
+              depth={depth + 1}
+              onSelect={actions.onSelectNote}
+              onDelete={actions.onDeleteNote}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function Sidebar({
   activeView,
   onNavigate,
@@ -867,9 +1031,13 @@ function Sidebar({
   collapsed,
   onToggleCollapse,
   notes,
+  folders,
+  collapsedFolders,
+  folderActions,
   activeNoteId,
   onSelectNote,
   onNewNote,
+  onNewFolder,
   onDeleteNote,
   syncStatus,
   lastSyncAt,
@@ -877,6 +1045,12 @@ function Sidebar({
   reviewDueCount,
 }) {
   const showNotesList = activeView === 'editor' && !collapsed
+  const byParent = buildFolderTree(folders)
+  const folderIds = new Set(folders.map((f) => f.id))
+  const rootFolders = byParent.get(null) || []
+  // 폴더가 없는(또는 폴더가 사라진) 노트는 루트에
+  const rootNotes = notes.filter((n) => !n.folderId || !folderIds.has(n.folderId))
+  const treeActions = { ...folderActions, onSelectNote, onDeleteNote }
 
   return (
     <aside
@@ -914,36 +1088,47 @@ function Sidebar({
         <div className="mt-2 flex min-h-0 flex-1 flex-col border-t border-border pt-2">
           <div className="flex items-center justify-between px-3 py-1.5">
             <span className="text-[11px] font-semibold uppercase tracking-wide text-ink-faint">노트</span>
-            <button onClick={onNewNote} title="새 노트 (Ctrl+Alt+N)" className="rounded p-1 text-ink-muted hover:bg-surface-alt hover:text-accent">
-              <Plus size={14} />
-            </button>
-          </div>
-          <div className="flex-1 overflow-y-auto px-2 pb-2">
-            {notes.length === 0 && <p className="px-2 py-4 text-center text-[11px] text-ink-faint">아직 작성한 노트가 없습니다</p>}
-            {notes.map((n) => (
-              <div
-                key={n.id}
-                className={cn(
-                  'group mb-0.5 flex items-center gap-1 rounded-lg px-1 py-1',
-                  n.id === activeNoteId ? 'bg-accent-soft' : 'hover:bg-surface-alt',
-                )}
+            <div className="flex items-center gap-0.5">
+              <button onClick={onNewFolder} title="새 폴더" className="rounded p-1 text-ink-muted hover:bg-surface-alt hover:text-accent">
+                <FolderPlus size={14} />
+              </button>
+              <button
+                onClick={onNewNote}
+                title="새 노트 (Ctrl+Alt+N)"
+                className="rounded p-1 text-ink-muted hover:bg-surface-alt hover:text-accent"
               >
-                <button onClick={() => onSelectNote(n.id)} className="min-w-0 flex-1 rounded-lg px-1.5 py-1 text-left">
-                  <p className={cn('truncate text-[12.5px] font-semibold', n.id === activeNoteId ? 'text-accent-strong' : 'text-ink')}>
-                    {n.title || '제목 없음'}
-                  </p>
-                  <p className="mt-0.5 flex items-center gap-1 text-[10.5px] text-ink-faint">
-                    {n.published ? <CheckCircle2 size={10} className="text-success" /> : <Clock size={10} />}
-                    {n.published ? '발행됨' : '초안'}
-                  </p>
-                </button>
-                <button
-                  onClick={() => onDeleteNote(n.id)}
-                  className="shrink-0 rounded p-1 text-ink-faint opacity-0 hover:bg-danger-soft hover:text-danger group-hover:opacity-100"
-                >
-                  <Trash2 size={11} />
-                </button>
-              </div>
+                <Plus size={14} />
+              </button>
+            </div>
+          </div>
+          {/* 리스트 빈 영역에 드롭하면 폴더 해제(루트로 이동) — 폴더 행 드롭은 stopPropagation으로 여기까지 오지 않음 */}
+          <div
+            className="flex-1 overflow-y-auto px-2 pb-2"
+            onDragOver={(e) => {
+              if ([...e.dataTransfer.types].includes(noteDragPayload)) e.preventDefault()
+            }}
+            onDrop={(e) => {
+              const id = e.dataTransfer.getData(noteDragPayload)
+              if (id) folderActions.onMoveNote(id, null)
+            }}
+          >
+            {notes.length === 0 && folders.length === 0 && (
+              <p className="px-2 py-4 text-center text-[11px] text-ink-faint">아직 작성한 노트가 없습니다</p>
+            )}
+            {rootFolders.map((f) => (
+              <FolderTreeNode
+                key={f.id}
+                folder={f}
+                depth={0}
+                byParent={byParent}
+                notes={notes}
+                activeNoteId={activeNoteId}
+                collapsedFolders={collapsedFolders}
+                actions={treeActions}
+              />
+            ))}
+            {rootNotes.map((n) => (
+              <SidebarNoteRow key={n.id} note={n} active={n.id === activeNoteId} depth={0} onSelect={onSelectNote} onDelete={onDeleteNote} />
             ))}
           </div>
         </div>
@@ -1113,13 +1298,24 @@ function BoardHeader({ onAddClick, count, boardMode, onSetBoardMode }) {
 // "복사 → 붙여넣기 → 끝" 문제 캡처 바.
 // URL 단독 붙여넣기는 즉시 등록, 여러 줄 붙여넣기는 줄 단위 일괄 등록,
 // 일반 텍스트(제목)는 Enter로 등록. "이름 URL" 혼합 한 줄도 지원.
-function QuickAddBar({ onAdd }) {
+function QuickAddBar({ onAdd, groups }) {
   const [value, setValue] = useState('')
+  // 등록 대상 그룹(문제집) — 선택은 유지돼 셋 단위로 연속 등록하기 좋다
+  const [group, setGroup] = useState('')
+  const [newGroupMode, setNewGroupMode] = useState(false)
+  const [newGroupDraft, setNewGroupDraft] = useState('')
 
   const commit = (text) => {
     const items = text.split(/\r?\n/).map(parseProblemLine).filter(Boolean)
-    if (items.length) onAdd(items)
+    if (items.length) onAdd(items, group)
     setValue('')
+  }
+
+  const confirmNewGroup = () => {
+    const name = newGroupDraft.trim()
+    if (name) setGroup(name)
+    setNewGroupMode(false)
+    setNewGroupDraft('')
   }
 
   return (
@@ -1152,6 +1348,53 @@ function QuickAddBar({ onAdd }) {
           className="w-full bg-transparent py-2 text-[13px] text-ink outline-none placeholder:text-ink-faint"
         />
         {value.trim() && <span className="shrink-0 font-mono text-[10px] text-ink-faint">Enter ↵</span>}
+        <div className="flex shrink-0 items-center gap-1 border-l border-border pl-2.5">
+          {newGroupMode ? (
+            <input
+              autoFocus
+              value={newGroupDraft}
+              onChange={(e) => setNewGroupDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault()
+                  confirmNewGroup()
+                } else if (e.key === 'Escape') {
+                  setNewGroupMode(false)
+                  setNewGroupDraft('')
+                }
+              }}
+              onBlur={confirmNewGroup}
+              placeholder="새 그룹 이름"
+              className="w-32 bg-transparent py-2 text-xs text-ink outline-none placeholder:text-ink-faint"
+            />
+          ) : (
+            <select
+              value={group}
+              onChange={(e) => {
+                if (e.target.value === '__new__') {
+                  setNewGroupMode(true)
+                  setNewGroupDraft('')
+                } else {
+                  setGroup(e.target.value)
+                }
+              }}
+              title="등록할 그룹(문제집)"
+              className={cn(
+                'max-w-40 cursor-pointer bg-transparent py-2 text-xs outline-none',
+                group ? 'font-semibold text-accent-strong' : 'text-ink-faint',
+              )}
+            >
+              <option value="">그룹 없음</option>
+              {groups.map((g) => (
+                <option key={g} value={g}>
+                  {g}
+                </option>
+              ))}
+              {group && !groups.includes(group) && <option value={group}>{group}</option>}
+              <option value="__new__">+ 새 그룹…</option>
+            </select>
+          )}
+        </div>
       </div>
     </div>
   )
@@ -1164,31 +1407,32 @@ const STATUS_SELECT_CLS = {
 }
 
 // 고밀도 리스트 뷰 — 한 줄 = 한 문제. 상태 셀렉트는 changeProblemStatus 공통 경로를
-// 타므로 Done 선택 시 복습 모달·노트 생성 흐름이 칸반 드래그와 동일하게 동작한다.
-function ProblemTable({ problems, onEdit, onDelete, onStatusChange }) {
-  const rows = [...problems].sort(
-    (a, b) => (STATUS_ORDER[a.status] ?? 1) - (STATUS_ORDER[b.status] ?? 1) || (b.createdAt || 0) - (a.createdAt || 0),
-  )
-  return (
-    <div className="flex-1 overflow-y-auto px-6 pb-6 pt-2">
-      {rows.length === 0 ? (
-        <p className="rounded-lg border border-dashed border-border py-10 text-center text-xs text-ink-faint">
-          문제가 없습니다 — 위 입력창에 링크를 붙여넣어 보세요
-        </p>
-      ) : (
-        <table className="w-full border-collapse text-[13px]">
-          <thead>
-            <tr className="border-b border-border text-left text-[10.5px] uppercase tracking-wide text-ink-faint">
-              <th className="w-32 py-2 pr-3 font-semibold">상태</th>
-              <th className="py-2 pr-3 font-semibold">문제</th>
-              <th className="w-24 py-2 pr-3 font-semibold">플랫폼</th>
-              <th className="w-16 py-2 pr-3 font-semibold">난이도</th>
-              <th className="w-56 py-2 pr-3 font-semibold">태그</th>
-              <th className="w-14 py-2" />
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((p) => (
+// 타므로 Done 선택 시 복습 모달 흐름이 칸반 드래그와 동일하게 동작한다.
+// 그룹 없는 문제 섹션의 접기 상태 키 — 그룹 이름과 충돌하지 않는 예약 문자열
+const UNGROUPED_KEY = '__cplog_ungrouped__'
+
+function ProblemTable({ problems, onEdit, onDelete, onStatusChange, collapsedGroups, onToggleGroup, onRenameGroup, onClearGroup }) {
+  const sortRows = (arr) =>
+    [...arr].sort((a, b) => (STATUS_ORDER[a.status] ?? 1) - (STATUS_ORDER[b.status] ?? 1) || (b.createdAt || 0) - (a.createdAt || 0))
+
+  // 그룹(문제집)별 섹션 — 최근에 문제가 추가된 그룹부터, '그룹 없음'은 맨 뒤.
+  // 그룹이 하나도 없으면 섹션 헤더 없이 기존 단일 표 그대로.
+  const byGroup = new Map()
+  for (const p of problems) {
+    const g = p.group || ''
+    if (!byGroup.has(g)) byGroup.set(g, [])
+    byGroup.get(g).push(p)
+  }
+  const latest = (arr) => Math.max(...arr.map((p) => p.createdAt || 0))
+  const named = [...byGroup.entries()]
+    .filter(([g]) => g)
+    .sort((a, b) => latest(b[1]) - latest(a[1]))
+    .map(([g, arr]) => ({ key: g, name: g, rows: sortRows(arr), named: true }))
+  const sections = named.length
+    ? [...named, ...(byGroup.has('') ? [{ key: UNGROUPED_KEY, name: '그룹 없음', rows: sortRows(byGroup.get('')), named: false }] : [])]
+    : [{ key: null, rows: sortRows(problems) }]
+
+  const renderRow = (p) => (
               <tr key={p.id} className={cn('group border-b border-border/60 hover:bg-surface-alt/50', p.status === 'done' && 'opacity-55')}>
                 <td className="py-1 pr-3">
                   <select
@@ -1242,8 +1486,68 @@ function ProblemTable({ problems, onEdit, onDelete, onStatusChange }) {
                   </div>
                 </td>
               </tr>
-            ))}
-          </tbody>
+  )
+
+  return (
+    <div className="flex-1 overflow-y-auto px-6 pb-6 pt-2">
+      {problems.length === 0 ? (
+        <p className="rounded-lg border border-dashed border-border py-10 text-center text-xs text-ink-faint">
+          문제가 없습니다 — 위 입력창에 링크를 붙여넣어 보세요
+        </p>
+      ) : (
+        <table className="w-full border-collapse text-[13px]">
+          <thead>
+            <tr className="border-b border-border text-left text-[10.5px] uppercase tracking-wide text-ink-faint">
+              <th className="w-32 py-2 pr-3 font-semibold">상태</th>
+              <th className="py-2 pr-3 font-semibold">문제</th>
+              <th className="w-24 py-2 pr-3 font-semibold">플랫폼</th>
+              <th className="w-16 py-2 pr-3 font-semibold">난이도</th>
+              <th className="w-56 py-2 pr-3 font-semibold">태그</th>
+              <th className="w-14 py-2" />
+            </tr>
+          </thead>
+          {sections.map((sec) => {
+            const open = sec.key === null || !collapsedGroups.includes(sec.key)
+            const done = sec.rows.filter((p) => p.status === 'done').length
+            return (
+              <tbody key={sec.key ?? '__all__'}>
+                {sec.key !== null && (
+                  <tr className="group/sec">
+                    <td colSpan={6} className="pb-1 pt-4">
+                      <div className="flex items-center gap-2">
+                        <button onClick={() => onToggleGroup(sec.key)} className="flex min-w-0 items-center gap-1.5 text-left">
+                          <ChevronRight size={13} className={cn('shrink-0 text-ink-faint transition-transform', open && 'rotate-90')} />
+                          <span className="truncate text-[13px] font-bold text-ink">{sec.name}</span>
+                        </button>
+                        <span className={cn('shrink-0 font-mono text-[11px]', done === sec.rows.length ? 'text-success' : 'text-ink-faint')}>
+                          {done}/{sec.rows.length} 해결
+                        </span>
+                        {sec.named && (
+                          <span className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover/sec:opacity-100">
+                            <button
+                              onClick={() => onRenameGroup(sec.name)}
+                              title="그룹 이름 변경"
+                              className="rounded p-1 text-ink-faint hover:bg-surface-alt hover:text-ink"
+                            >
+                              <Pencil size={11} />
+                            </button>
+                            <button
+                              onClick={() => onClearGroup(sec.name)}
+                              title="그룹 해제 — 문제는 '그룹 없음'으로 이동"
+                              className="rounded p-1 text-ink-faint hover:bg-danger-soft hover:text-danger"
+                            >
+                              <X size={12} />
+                            </button>
+                          </span>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                )}
+                {open && sec.rows.map(renderRow)}
+              </tbody>
+            )
+          })}
         </table>
       )}
     </div>
@@ -1361,6 +1665,7 @@ function KanbanColumns({ problems, onEdit, onDelete, onStatusChange }) {
 // To Solve 화면 전체 — 헤더(뷰 토글) + 캡처 바 + 복습 스트립 + 리스트/칸반 뷰
 function ProblemBoard({
   problems,
+  groups,
   boardMode,
   onSetBoardMode,
   onAddClick,
@@ -1370,22 +1675,35 @@ function ProblemBoard({
   onStatusChange,
   onReviewRetry,
   onReviewComplete,
+  collapsedGroups,
+  onToggleGroup,
+  onRenameGroup,
+  onClearGroup,
 }) {
   return (
     <div className="flex h-full flex-col">
       <BoardHeader count={problems.length} onAddClick={onAddClick} boardMode={boardMode} onSetBoardMode={onSetBoardMode} />
-      <QuickAddBar onAdd={onQuickAdd} />
+      <QuickAddBar onAdd={onQuickAdd} groups={groups} />
       <ReviewStrip problems={problems} onRetry={onReviewRetry} onComplete={onReviewComplete} />
       {boardMode === 'kanban' ? (
         <KanbanColumns problems={problems} onEdit={onEdit} onDelete={onDelete} onStatusChange={onStatusChange} />
       ) : (
-        <ProblemTable problems={problems} onEdit={onEdit} onDelete={onDelete} onStatusChange={onStatusChange} />
+        <ProblemTable
+          problems={problems}
+          onEdit={onEdit}
+          onDelete={onDelete}
+          onStatusChange={onStatusChange}
+          collapsedGroups={collapsedGroups}
+          onToggleGroup={onToggleGroup}
+          onRenameGroup={onRenameGroup}
+          onClearGroup={onClearGroup}
+        />
       )}
     </div>
   )
 }
 
-function ProblemModal({ initial, onClose, onSave }) {
+function ProblemModal({ initial, groups, onClose, onSave }) {
   const isEdit = !!initial
   const [form, setForm] = useState(
     () =>
@@ -1395,6 +1713,7 @@ function ProblemModal({ initial, onClose, onSave }) {
         platform: PLATFORMS[0],
         difficulty: '',
         tags: [],
+        group: '',
         status: 'todo',
         reviewAt: null,
       },
@@ -1411,7 +1730,7 @@ function ProblemModal({ initial, onClose, onSave }) {
   const submit = (e) => {
     e.preventDefault()
     if (!form.name.trim()) return
-    onSave({ ...form, id: initial?.id ?? uid(), createdAt: initial?.createdAt ?? Date.now() })
+    onSave({ ...form, group: (form.group || '').trim(), id: initial?.id ?? uid(), createdAt: initial?.createdAt ?? Date.now() })
   }
 
   return (
@@ -1453,6 +1772,20 @@ function ProblemModal({ initial, onClose, onSave }) {
             />
           </Field>
         </div>
+        <Field label="그룹 (문제집)">
+          <input
+            value={form.group || ''}
+            onChange={(e) => setForm((f) => ({ ...f, group: e.target.value }))}
+            list="cp-group-datalist"
+            className="cp-input"
+            placeholder="예: BOJ 단계별, ABC 412 (비우면 그룹 없음)"
+          />
+          <datalist id="cp-group-datalist">
+            {(groups || []).map((g) => (
+              <option key={g} value={g} />
+            ))}
+          </datalist>
+        </Field>
         <Field label="태그">
           <div className="flex flex-wrap items-center gap-1.5 rounded-lg border border-border bg-surface px-2.5 py-2">
             {form.tags.map((t) => (
@@ -1514,7 +1847,7 @@ function ProblemModal({ initial, onClose, onSave }) {
   )
 }
 
-// 문제가 Done으로 전환된 직후 복습 주기를 고르는 모달 — 선택/닫기 후 오답 노트가 열린다
+// 문제가 Done으로 전환된 직후 복습 주기를 고르는 모달 (닫기 = "안 함")
 function ReviewModal({ problem, onSelect, onClose }) {
   return (
     <ModalShell title="복습 예약" onClose={onClose}>
@@ -1538,6 +1871,223 @@ function ReviewModal({ problem, onSelect, onClose }) {
           </button>
         ))}
       </div>
+    </ModalShell>
+  )
+}
+
+// 폴더 생성/편집 모달 — initial이 id를 가지면 편집, {parentId}면 해당 위치에 새 폴더
+function FolderModal({ initial, folders, onClose, onSave }) {
+  const isEdit = !!initial?.id
+  const [form, setForm] = useState(() => (isEdit ? { ...initial } : { name: '', emoji: '', color: '', parentId: initial?.parentId ?? null }))
+
+  // 자기 자신과 자손은 상위 폴더 후보에서 제외 (순환 방지)
+  const descendants = useMemo(() => {
+    if (!isEdit) return new Set()
+    const set = new Set([initial.id])
+    let grew = true
+    while (grew) {
+      grew = false
+      for (const f of folders) {
+        if (f.parentId && set.has(f.parentId) && !set.has(f.id)) {
+          set.add(f.id)
+          grew = true
+        }
+      }
+    }
+    return set
+  }, [isEdit, initial, folders])
+
+  // 상위 폴더 셀렉트 라벨은 전체 경로("부모 / 자식")로 표시
+  const pathById = useMemo(() => {
+    const byId = new Map(folders.map((f) => [f.id, f]))
+    const pathOf = (f) => {
+      const parts = [f.name]
+      const seen = new Set([f.id])
+      let cur = f
+      while (cur.parentId && byId.has(cur.parentId) && !seen.has(cur.parentId)) {
+        cur = byId.get(cur.parentId)
+        seen.add(cur.id)
+        parts.unshift(cur.name)
+      }
+      return parts.join(' / ')
+    }
+    return new Map(folders.map((f) => [f.id, pathOf(f)]))
+  }, [folders])
+
+  const parentOptions = folders
+    .filter((f) => !descendants.has(f.id))
+    .sort((a, b) => (pathById.get(a.id) || '').localeCompare(pathById.get(b.id) || '', 'ko'))
+
+  const submit = (e) => {
+    e.preventDefault()
+    if (!form.name.trim()) return
+    onSave({
+      ...form,
+      name: form.name.trim(),
+      emoji: (form.emoji || '').trim(),
+      parentId: form.parentId || null,
+      id: initial?.id ?? uid(),
+      createdAt: initial?.createdAt ?? Date.now(),
+      updatedAt: Date.now(),
+    })
+  }
+
+  return (
+    <ModalShell onClose={onClose} title={isEdit ? '폴더 편집' : '새 폴더'}>
+      <form onSubmit={submit} className="flex flex-col gap-4">
+        <Field label="폴더 이름" required>
+          <input
+            autoFocus
+            value={form.name}
+            onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
+            className="cp-input"
+            placeholder="예: 대회 기록"
+          />
+        </Field>
+        <Field label="이모지">
+          <div className="flex items-center gap-2">
+            <input
+              value={form.emoji || ''}
+              onChange={(e) => setForm((f) => ({ ...f, emoji: e.target.value }))}
+              maxLength={4}
+              className="cp-input w-16 text-center"
+              placeholder="—"
+            />
+            <div className="flex flex-wrap gap-1">
+              {FOLDER_EMOJI_PRESETS.map((em) => (
+                <button
+                  type="button"
+                  key={em}
+                  onClick={() => setForm((f) => ({ ...f, emoji: f.emoji === em ? '' : em }))}
+                  className={cn(
+                    'flex h-7 w-7 items-center justify-center rounded-lg border text-[14px]',
+                    form.emoji === em ? 'border-accent bg-accent-soft' : 'border-border hover:bg-surface-alt',
+                  )}
+                >
+                  {em}
+                </button>
+              ))}
+            </div>
+          </div>
+        </Field>
+        <Field label="색상">
+          <div className="flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => setForm((f) => ({ ...f, color: '' }))}
+              title="색상 없음"
+              className={cn(
+                'flex h-6 w-6 items-center justify-center rounded-full border',
+                !form.color ? 'border-accent bg-accent-soft' : 'border-border hover:bg-surface-alt',
+              )}
+            >
+              <X size={11} className="text-ink-faint" />
+            </button>
+            {Object.entries(FOLDER_COLORS).map(([key, hex]) => (
+              <button
+                type="button"
+                key={key}
+                title={key}
+                onClick={() => setForm((f) => ({ ...f, color: key }))}
+                className={cn('h-6 w-6 rounded-full border-2 transition-transform', form.color === key ? 'scale-110 border-ink' : 'border-transparent')}
+                style={{ backgroundColor: hex }}
+              />
+            ))}
+          </div>
+        </Field>
+        <Field label="상위 폴더">
+          <select
+            value={form.parentId || ''}
+            onChange={(e) => setForm((f) => ({ ...f, parentId: e.target.value || null }))}
+            className="cp-input"
+          >
+            <option value="">(루트)</option>
+            {parentOptions.map((f) => (
+              <option key={f.id} value={f.id}>
+                {pathById.get(f.id)}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <div className="mt-2 flex justify-end gap-2">
+          <button type="button" onClick={onClose} className="cp-btn-ghost">
+            취소
+          </button>
+          <button type="submit" className="cp-btn-primary">
+            {isEdit ? '저장' : '만들기'}
+          </button>
+        </div>
+      </form>
+    </ModalShell>
+  )
+}
+
+// 새 노트 생성 시 시작 템플릿 선택 — 빈 노트 또는 스니펫(제목 템플릿 포함) 퀵픽
+function NewNoteModal({ snippets, onClose, onCreate }) {
+  const [activeIdx, setActiveIdx] = useState(0)
+  const boxRef = useRef(null)
+  const items = [
+    { key: '__blank__', icon: FileText, name: '빈 노트', sub: '내용 없이 시작', snippet: null },
+    ...snippets.map((s) => ({
+      key: s.id,
+      icon: Braces,
+      name: s.name || '이름 없음',
+      sub: s.title ? `제목: ${s.title}` : null,
+      snippet: s,
+    })),
+  ]
+
+  useEffect(() => {
+    boxRef.current?.focus()
+  }, [])
+  useEffect(() => {
+    boxRef.current?.querySelector('[data-nn-active="true"]')?.scrollIntoView({ block: 'nearest' })
+  }, [activeIdx])
+
+  const handleKeyDown = (e) => {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault()
+      setActiveIdx((i) => (i + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length)
+    } else if (e.key === 'Enter') {
+      e.preventDefault()
+      onCreate(items[activeIdx].snippet)
+    } else if (e.key === 'Escape') {
+      e.preventDefault()
+      onClose()
+    }
+  }
+
+  return (
+    <ModalShell title="새 노트" onClose={onClose}>
+      <div ref={boxRef} tabIndex={-1} onKeyDown={handleKeyDown} className="max-h-[50vh] overflow-y-auto outline-none">
+        {items.map((item, i) => {
+          const Icon = item.icon
+          const isActive = i === activeIdx
+          return (
+            <button
+              key={item.key}
+              data-nn-active={isActive || undefined}
+              onClick={() => onCreate(item.snippet)}
+              onMouseMove={() => setActiveIdx(i)}
+              className={cn(
+                'mb-0.5 flex w-full items-center gap-2.5 rounded-lg px-3 py-2.5 text-left',
+                isActive ? 'bg-accent-soft' : 'hover:bg-surface-alt',
+              )}
+            >
+              <Icon size={15} className={cn('shrink-0', isActive ? 'text-accent-strong' : 'text-ink-faint')} />
+              <span className={cn('min-w-0 flex-1 truncate text-[13px] font-medium', isActive ? 'text-accent-strong' : 'text-ink')}>
+                {item.name}
+              </span>
+              {item.sub && <span className="max-w-44 shrink-0 truncate text-[10.5px] text-ink-faint">{item.sub}</span>}
+            </button>
+          )
+        })}
+      </div>
+      <p className="mt-3 flex items-center gap-3 text-[10.5px] text-ink-faint">
+        <span>↑↓ 이동</span>
+        <span>Enter 만들기</span>
+        <span>Esc 닫기</span>
+      </p>
     </ModalShell>
   )
 }
@@ -1728,13 +2278,24 @@ const cmTheme = CMEditorView.theme({
   '.cm-placeholder': { color: 'var(--color-ink-faint)' },
   '.cm-panels': { backgroundColor: 'var(--color-surface-alt)', color: 'var(--color-ink)' },
   '.cm-panels-bottom': { borderTop: '1px solid var(--color-border)' },
-  '.cm-panel.cm-search': { fontFamily: 'var(--font-sans)', fontSize: '12px', padding: '8px 12px' },
-  '.cm-panel.cm-search input': {
+  // CM 기본 테마가 패널 인풋/버튼에 font-size 70%를 강제해 너무 작게 보임 — 명시 크기로 덮어씀
+  '.cm-panel.cm-search': { fontFamily: 'var(--font-sans)', fontSize: '13px', padding: '10px 40px 10px 14px' },
+  '.cm-panel.cm-search .cm-textfield': {
     backgroundColor: 'var(--color-surface)',
     color: 'var(--color-ink)',
     border: '1px solid var(--color-border)',
     borderRadius: '6px',
     outline: 'none',
+    fontSize: '13px',
+    padding: '5px 10px',
+  },
+  '.cm-panel.cm-search .cm-textfield:focus': { borderColor: 'var(--color-accent)' },
+  '.cm-panel.cm-search input[type="checkbox"]': {
+    width: '13px',
+    height: '13px',
+    verticalAlign: 'text-top',
+    accentColor: 'var(--color-accent)',
+    marginRight: '4px',
   },
   '.cm-panel.cm-search button': {
     backgroundImage: 'none',
@@ -1742,8 +2303,24 @@ const cmTheme = CMEditorView.theme({
     color: 'var(--color-ink-muted)',
     border: '1px solid var(--color-border)',
     borderRadius: '6px',
+    fontSize: '12.5px',
+    padding: '5px 12px',
+    cursor: 'pointer',
   },
-  '.cm-panel.cm-search label': { color: 'var(--color-ink-muted)' },
+  '.cm-panel.cm-search button:hover': { backgroundColor: 'var(--color-surface-alt)', color: 'var(--color-ink)' },
+  '.cm-panel.cm-search [name="close"]': {
+    border: 'none',
+    backgroundColor: 'transparent',
+    color: 'var(--color-ink-faint)',
+    fontSize: '18px',
+    lineHeight: '1',
+    padding: '4px 8px',
+    top: '8px',
+    right: '8px',
+    cursor: 'pointer',
+  },
+  '.cm-panel.cm-search [name="close"]:hover': { backgroundColor: 'transparent', color: 'var(--color-ink)' },
+  '.cm-panel.cm-search label': { color: 'var(--color-ink-muted)', fontSize: '12.5px' },
   '.cm-searchMatch': { backgroundColor: 'color-mix(in srgb, var(--color-warning) 30%, transparent)' },
   '.cm-searchMatch-selected': { backgroundColor: 'color-mix(in srgb, var(--color-warning) 55%, transparent)' },
   '.cm-tooltip': {
@@ -1795,10 +2372,30 @@ const cmBaseExtensions = [
   keymap.of([indentWithTab, ...defaultKeymap, ...historyKeymap, ...searchKeymap]),
 ]
 
-function SourcePane({ noteId, content, onChange, viewRef, notes, problems }) {
+// 붙여넣기/드롭한 이미지 파일을 base64 data URI ![]() 로 지정 위치에 삽입.
+// 2MB 초과는 거부 — localStorage(~5MB)·노트 md 페이로드 보호.
+const MAX_PASTE_IMAGE_BYTES = 2 * 1024 * 1024
+function insertImageFile(view, file, pos, onToast) {
+  if (file.size > MAX_PASTE_IMAGE_BYTES) {
+    onToast?.('error', '이미지가 너무 큽니다 (최대 2MB). 링크로 삽입하거나 크기를 줄여주세요.')
+    return
+  }
+  const reader = new FileReader()
+  reader.onload = () => {
+    const at = pos ?? view.state.selection.main.from
+    const insert = `![이미지](${reader.result})`
+    view.dispatch({ changes: { from: at, to: at, insert }, selection: { anchor: at + insert.length } })
+    view.focus()
+  }
+  reader.readAsDataURL(file)
+}
+
+function SourcePane({ noteId, content, onChange, viewRef, notes, problems, onToast }) {
   const containerRef = useRef(null)
   const onChangeRef = useRef(onChange)
   onChangeRef.current = onChange
+  const onToastRef = useRef(onToast)
+  onToastRef.current = onToast
   // CM이 마지막으로 알고 있는 내용 — 외부 변경(원격 pull)과 자체 편집을 구분해 루프 방지
   const lastContentRef = useRef(null)
   // [[ 자동완성이 항상 최신 목록을 읽도록 ref로 전달 (extensions는 1회만 생성되므로)
@@ -1831,8 +2428,30 @@ function SourcePane({ noteId, content, onChange, viewRef, notes, problems }) {
       ]
       return { from: match.from + 2, options, validFor: /^[^\]\n]*$/ }
     }
+    // 클립보드/드래그의 이미지 파일 → base64 삽입. 이미지가 없으면 false 반환해 기본 동작(텍스트) 유지.
+    const imageEventHandlers = CMEditorView.domEventHandlers({
+      paste: (event, view) => {
+        const items = [...(event.clipboardData?.items || [])]
+        const item = items.find((it) => it.kind === 'file' && it.type.startsWith('image/'))
+        if (!item) return false
+        const file = item.getAsFile()
+        if (!file) return false
+        event.preventDefault()
+        insertImageFile(view, file, null, onToastRef.current)
+        return true
+      },
+      drop: (event, view) => {
+        const file = [...(event.dataTransfer?.files || [])].find((f) => f.type.startsWith('image/'))
+        if (!file) return false // 사이드바 노트 DnD 등 파일 아닌 드롭은 그대로 통과
+        event.preventDefault()
+        const pos = view.posAtCoords({ x: event.clientX, y: event.clientY })
+        insertImageFile(view, file, pos, onToastRef.current)
+        return true
+      },
+    })
     extensionsRef.current = [
       ...cmBaseExtensions,
+      imageEventHandlers,
       autocompletion({ override: [linkCompletionSource], icons: false }),
       keymap.of([
         {
@@ -1926,6 +2545,8 @@ function MarkdownPreview({ content, notes, onOpenWikiLink }) {
         <ReactMarkdown
           remarkPlugins={[remarkGfm, remarkMath, remarkWikiLinks]}
           rehypePlugins={[rehypeKatex, rehypeHighlight]}
+          // 기본 urlTransform은 data: URI를 제거해 붙여넣은 이미지가 깨진다 — 이미지 data URI만 통과시킴
+          urlTransform={(url) => (url.startsWith('data:image/') ? url : defaultUrlTransform(url))}
           components={{
             // eslint-disable-next-line no-unused-vars
             a({ href, children, node, ...props }) {
@@ -2017,6 +2638,7 @@ function EditorView({
   problems,
   onOpenWikiLink,
   onSelectNote,
+  onToast,
 }) {
   const cmViewRef = useRef(null)
 
@@ -2024,7 +2646,11 @@ function EditorView({
   const insertSnippet = (snippet) => {
     const view = cmViewRef.current
     if (!activeNote || !view) return
-    const { text, cursorOffset } = renderSnippet(snippet.content, { title: activeNote.title })
+    // 제목 없는 노트에 제목 템플릿 있는 스니펫을 삽입하면 노트 제목도 함께 설정
+    const snippetTitle = renderSnippetVars(snippet.title || '').trim()
+    const applyTitle = !!snippetTitle && !(activeNote.title || '').trim()
+    if (applyTitle) onUpdateNote(activeNote.id, { title: snippetTitle })
+    const { text, cursorOffset } = renderSnippet(snippet.content, { title: applyTitle ? snippetTitle : activeNote.title })
     const { from, to } = view.state.selection.main
     view.dispatch({
       changes: { from, to, insert: text },
@@ -2060,6 +2686,7 @@ function EditorView({
                 viewRef={cmViewRef}
                 notes={notes}
                 problems={problems}
+                onToast={onToast}
               />
             )}
           </div>
@@ -2284,6 +2911,14 @@ function SnippetsModal({ snippets, onClose, onCreate, onUpdate, onDelete, onImpo
             <Field label="이름">
               <input value={selected.name} onChange={(e) => onUpdate(selected.id, { name: e.target.value })} className="cp-input" />
             </Field>
+            <Field label="제목 템플릿">
+              <input
+                value={selected.title || ''}
+                onChange={(e) => onUpdate(selected.id, { title: e.target.value })}
+                className="cp-input"
+                placeholder="예: {{date}} 오답노트 — 비우면 제목 미설정"
+              />
+            </Field>
             <Field label="내용">
               <textarea
                 value={selected.content}
@@ -2294,7 +2929,8 @@ function SnippetsModal({ snippets, onClose, onCreate, onUpdate, onDelete, onImpo
             </Field>
             <p className="text-[11px] leading-relaxed text-ink-faint">
               사용 가능한 변수: {'{{date}}'} {'{{time}}'} {'{{datetime}}'} {'{{title}}'} {'{{cursor}}'} — 삽입 시 치환되며, {'{{cursor}}'}{' '}
-              위치로 커서가 이동합니다.
+              위치로 커서가 이동합니다. 제목 템플릿({'{{date}}'}/{'{{time}}'}/{'{{datetime}}'} 사용 가능)은 이 스니펫으로 새 노트를 만들거나
+              제목 없는 노트에 삽입할 때 노트 제목이 됩니다.
             </p>
             <div className="flex justify-between">
               <button onClick={handleDelete} className="cp-btn-ghost text-danger hover:bg-danger-soft">
@@ -2538,10 +3174,27 @@ function SessionNoteModal({ onClose, onCreate }) {
 
 const QS_SECTION_LIMIT = 8 // 노트/문제 섹션당 최대 표시 수 — 넘치는 항목은 검색으로 좁히는 것을 전제
 
-function QuickSwitcher({ notes, problems, commands, onClose, onOpenNote, onOpenProblem }) {
+function QuickSwitcher({ notes, folders = [], problems, commands, onClose, onOpenNote, onOpenProblem }) {
   const [query, setQuery] = useState('')
   const [activeIdx, setActiveIdx] = useState(0)
   const listRef = useRef(null)
+
+  // 노트 서브텍스트에 붙일 폴더 경로("부모 / 자식")
+  const folderPathById = useMemo(() => {
+    const byId = new Map(folders.map((f) => [f.id, f]))
+    const pathOf = (f) => {
+      const parts = [f.name]
+      const seen = new Set([f.id])
+      let cur = f
+      while (cur.parentId && byId.has(cur.parentId) && !seen.has(cur.parentId)) {
+        cur = byId.get(cur.parentId)
+        seen.add(cur.id)
+        parts.unshift(cur.name)
+      }
+      return parts.join(' / ')
+    }
+    return new Map(folders.map((f) => [f.id, pathOf(f)]))
+  }, [folders])
 
   const items = useMemo(() => {
     const q = query.trim().toLowerCase()
@@ -2557,7 +3210,7 @@ function QuickSwitcher({ notes, problems, commands, onClose, onOpenNote, onOpenP
       const sub =
         contentIdx >= 0
           ? `…${(n.content || '').slice(Math.max(0, contentIdx - 12), contentIdx + q.length + 28).replace(/\s+/g, ' ')}…`
-          : (n.tags || []).join(', ')
+          : [folderPathById.get(n.folderId), (n.tags || []).join(', ')].filter(Boolean).join(' · ')
       result.push({
         key: `note-${n.id}`,
         section: '노트',
@@ -2587,7 +3240,7 @@ function QuickSwitcher({ notes, problems, commands, onClose, onOpenNote, onOpenP
       result.push({ key: `cmd-${c.id}`, section: '명령', icon: c.icon, label: c.label, hint: c.hint, run: c.run })
     }
     return result
-  }, [query, notes, problems, commands, onOpenNote, onOpenProblem])
+  }, [query, notes, problems, commands, onOpenNote, onOpenProblem, folderPathById])
 
   // 검색어가 바뀌면 첫 항목 선택, 결과가 줄면 범위 안으로 클램프
   const active = Math.min(activeIdx, Math.max(0, items.length - 1))
@@ -2681,6 +3334,7 @@ function QuickSwitcher({ notes, problems, commands, onClose, onOpenNote, onOpenP
 export default function App() {
   const [problems, setProblems] = useLocalStorageState(LS_KEYS.PROBLEMS, [])
   const [notes, setNotes] = useLocalStorageState(LS_KEYS.NOTES, [])
+  const [folders, setFolders] = useLocalStorageState(LS_KEYS.FOLDERS, [])
   const [snippets, setSnippets] = useLocalStorageState(LS_KEYS.SNIPPETS, DEFAULT_SNIPPETS)
   const [githubSettings, setGithubSettings] = useLocalStorageState(LS_KEYS.GITHUB, DEFAULT_GITHUB_SETTINGS)
   const [uiState, setUiState] = useLocalStorageState(LS_KEYS.UI, {
@@ -2703,6 +3357,8 @@ export default function App() {
   const [switcherOpen, setSwitcherOpen] = useState(false)
   const [problemModal, setProblemModal] = useState(null) // null | {} | problem
   const [reviewModal, setReviewModal] = useState(null) // null | problem (Done 전환 직후 복습 주기 선택)
+  const [folderModal, setFolderModal] = useState(null) // null | {parentId} | folder
+  const [newNoteModal, setNewNoteModal] = useState(null) // null | {folderId} (새 노트 템플릿 선택)
   const [sessionNoteOpen, setSessionNoteOpen] = useState(false)
   const [publishing, setPublishing] = useState(false)
 
@@ -2722,36 +3378,13 @@ export default function App() {
     markDirty,
     queueDelete,
     createDataRepo,
-  } = useGithubSync({ settings: gh, notes, setNotes, problems, setProblems, snippets, setSnippets, addToast })
+  } = useGithubSync({ settings: gh, notes, setNotes, problems, setProblems, snippets, setSnippets, folders, setFolders, addToast })
 
   const activeNote = notes.find((n) => n.id === uiState.activeNoteId) || null
   const boardMode = uiState.boardMode || 'list' // 예전 저장분에는 키가 없음 → 리스트 기본
   const navigate = (view) => setUiState((s) => ({ ...s, activeView: view }))
   const toggleSidebarCollapsed = () => setUiState((s) => ({ ...s, sidebarCollapsed: !s.sidebarCollapsed }))
   const setEditorMode = (mode) => setUiState((s) => ({ ...s, editorMode: mode }))
-
-  const openOrCreateNoteForProblem = (problem) => {
-    const existing = notes.find((n) => n.problemId === problem.id)
-    if (existing) {
-      setUiState((s) => ({ ...s, activeView: 'editor', activeNoteId: existing.id }))
-      return
-    }
-    const note = {
-      id: uid(),
-      problemId: problem.id,
-      title: problem.name,
-      category: problem.platform,
-      tags: [...(problem.tags || [])],
-      content: buildTemplate(problem),
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-      published: false,
-      publishedPath: null,
-    }
-    setNotes((prev) => [note, ...prev])
-    markDirty(`notes/${note.id}.md`)
-    setUiState((s) => ({ ...s, activeView: 'editor', activeNoteId: note.id }))
-  }
 
   const changeProblemStatus = (problemId, status) => {
     const problem = problems.find((p) => p.id === problemId)
@@ -2776,7 +3409,7 @@ export default function App() {
     if (isNewlyDone) setReviewModal(formProblem)
   }
 
-  // 복습 주기 선택(모달 닫기 = "안 함") 후 기존 흐름대로 오답 노트를 연다
+  // 복습 주기 선택 (모달 닫기 = "안 함")
   const applyReviewChoice = (days) => {
     const problem = reviewModal
     setReviewModal(null)
@@ -2785,7 +3418,6 @@ export default function App() {
       setProblems((prev) => prev.map((p) => (p.id === problem.id ? { ...p, reviewAt } : p)))
       markDirty('problems.json')
     }
-    openOrCreateNoteForProblem(problem)
   }
 
   const retryReviewProblem = (problem) => {
@@ -2800,14 +3432,73 @@ export default function App() {
 
   const reviewDueCount = problems.filter((p) => p.reviewAt != null && Date.now() >= p.reviewAt).length
 
+  // --- 폴더 (에디터 노트 트리) ---
+
+  const collapsedFolders = uiState.collapsedFolders || [] // 예전 저장분에는 키가 없음
+  const toggleFolder = (id) =>
+    setUiState((s) => {
+      const cur = s.collapsedFolders || []
+      return { ...s, collapsedFolders: cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id] }
+    })
+
+  const upsertFolder = (folder) => {
+    setFolders((prev) => (prev.some((f) => f.id === folder.id) ? prev.map((f) => (f.id === folder.id ? folder : f)) : [...prev, folder]))
+    markDirty('folders.json')
+    setFolderModal(null)
+  }
+
+  // 폴더 삭제 — 안의 노트/하위 폴더는 지우지 않고 한 단계 위로 올린다
+  const deleteFolder = (folder) => {
+    if (!window.confirm(`"${folder.name}" 폴더를 삭제할까요?\n안의 노트와 하위 폴더는 상위로 이동합니다.`)) return
+    const newParent = folder.parentId ?? null
+    setFolders((prev) =>
+      prev.filter((f) => f.id !== folder.id).map((f) => (f.parentId === folder.id ? { ...f, parentId: newParent, updatedAt: Date.now() } : f)),
+    )
+    const moved = notes.filter((n) => n.folderId === folder.id)
+    if (moved.length) {
+      setNotes((prev) => prev.map((n) => (n.folderId === folder.id ? { ...n, folderId: newParent, updatedAt: Date.now() } : n)))
+      for (const n of moved) markDirty(`notes/${n.id}.md`)
+    }
+    markDirty('folders.json')
+  }
+
+  const moveNoteToFolder = (noteId, folderId) => {
+    const note = notes.find((n) => n.id === noteId)
+    if (!note || (note.folderId ?? null) === (folderId ?? null)) return
+    updateNote(noteId, { folderId: folderId ?? null })
+  }
+
+  // --- 그룹 (문제집) ---
+
+  const problemGroups = useMemo(() => [...new Set(problems.map((p) => p.group).filter(Boolean))], [problems])
+  const collapsedGroups = uiState.collapsedGroups || []
+  const toggleProblemGroup = (key) =>
+    setUiState((s) => {
+      const cur = s.collapsedGroups || []
+      return { ...s, collapsedGroups: cur.includes(key) ? cur.filter((x) => x !== key) : [...cur, key] }
+    })
+
+  const renameProblemGroup = (name) => {
+    const next = window.prompt('그룹 이름 변경', name)?.trim()
+    if (!next || next === name) return
+    setProblems((prev) => prev.map((p) => (p.group === name ? { ...p, group: next } : p)))
+    markDirty('problems.json')
+  }
+
+  const clearProblemGroup = (name) => {
+    if (!window.confirm(`"${name}" 그룹을 해제할까요?\n문제는 삭제되지 않고 '그룹 없음'으로 이동합니다.`)) return
+    setProblems((prev) => prev.map((p) => (p.group === name ? { ...p, group: '' } : p)))
+    markDirty('problems.json')
+  }
+
   const deleteProblem = (problem) => {
     if (!window.confirm(`"${problem.name}" 문제를 삭제할까요?`)) return
     setProblems((prev) => prev.filter((p) => p.id !== problem.id))
     markDirty('problems.json')
   }
 
-  // 캡처 바 일괄 등록 — 파싱된 줄들을 To Do로 즉시 추가
-  const quickAddProblems = (items) => {
+  // 캡처 바 일괄 등록 — 파싱된 줄들을 To Do로 즉시 추가 (선택된 그룹이 있으면 그 문제집으로)
+  const quickAddProblems = (items, group) => {
     const created = items.map((it) => ({
       id: uid(),
       name: it.name,
@@ -2815,6 +3506,7 @@ export default function App() {
       platform: it.platform,
       difficulty: '',
       tags: [],
+      group: group || '',
       status: 'todo',
       createdAt: Date.now(),
       reviewAt: null,
@@ -2824,14 +3516,15 @@ export default function App() {
     addToast('success', `문제 ${created.length}개를 추가했습니다.`)
   }
 
-  const createBlankNote = () => {
+  const createNote = (folderId = null, init = {}) => {
     const note = {
       id: uid(),
       problemId: null,
-      title: '',
+      title: init.title || '',
       category: '',
       tags: [],
-      content: buildTemplate(null),
+      folderId,
+      content: init.content || '',
       createdAt: Date.now(),
       updatedAt: Date.now(),
       published: false,
@@ -2840,6 +3533,23 @@ export default function App() {
     setNotes((prev) => [note, ...prev])
     markDirty(`notes/${note.id}.md`)
     setUiState((s) => ({ ...s, activeView: 'editor', activeNoteId: note.id }))
+  }
+
+  // 새 노트 진입점 — 스니펫이 있으면 템플릿 선택 모달, 없으면 바로 빈 노트.
+  // onClick/단축키 콜백에 직접 걸리므로 이벤트 인자가 folderId로 새지 않게 분리한다.
+  const requestNewNoteInFolder = (folderId) => (snippets.length ? setNewNoteModal({ folderId }) : createNote(folderId))
+  const requestNewNote = () => requestNewNoteInFolder(null)
+
+  const createNoteFromChoice = (snippet) => {
+    const { folderId } = newNoteModal
+    setNewNoteModal(null)
+    if (!snippet) {
+      createNote(folderId)
+      return
+    }
+    const title = renderSnippetVars(snippet.title || '').trim()
+    const { text } = renderSnippet(snippet.content, { title })
+    createNote(folderId, { title, content: text })
   }
 
   const updateNote = (id, patch) => {
@@ -2865,6 +3575,7 @@ export default function App() {
       title: name ? `${compact} ${name}` : compact,
       category: name || '세션',
       tags: [],
+      folderId: null,
       content: `${sections}# Upsolving\n\n`,
       createdAt: Date.now(),
       updatedAt: Date.now(),
@@ -3010,6 +3721,7 @@ export default function App() {
       title: title.trim(),
       category: '',
       tags: [],
+      folderId: null,
       content: '',
       createdAt: Date.now(),
       updatedAt: Date.now(),
@@ -3090,11 +3802,12 @@ export default function App() {
   const toggleEditorMode = () =>
     setUiState((s) => ({ ...s, activeView: 'editor', editorMode: s.editorMode === 'preview' ? 'edit' : 'preview' }))
   const handleSyncShortcut = () => (syncStatus === 'off' ? setSettingsOpen(true) : syncNow())
-  const anyModalOpen = settingsOpen || snippetsOpen || problemModal !== null || reviewModal !== null || sessionNoteOpen
+  const anyModalOpen =
+    settingsOpen || snippetsOpen || problemModal !== null || reviewModal !== null || sessionNoteOpen || folderModal !== null || newNoteModal !== null
 
   // capture 리스너라 CodeMirror 키맵보다 먼저 돈다 — 여기서 다루는 키 외(Ctrl+F 등)는 건드리지 않을 것
   const shortcutRef = useRef(null)
-  shortcutRef.current = { anyModalOpen, switcherOpen, toggleEditorMode, createBlankNote, handleSyncShortcut }
+  shortcutRef.current = { anyModalOpen, switcherOpen, toggleEditorMode, requestNewNote, handleSyncShortcut }
   useEffect(() => {
     const onKeyDown = (e) => {
       if (!(e.ctrlKey || e.metaKey)) return
@@ -3119,7 +3832,7 @@ export default function App() {
         // Ctrl+N은 브라우저 예약키라 가로챌 수 없어 Ctrl+Alt+N 사용
         e.preventDefault()
         e.stopPropagation()
-        ctx.createBlankNote()
+        ctx.requestNewNote()
       }
     }
     window.addEventListener('keydown', onKeyDown, true)
@@ -3127,7 +3840,8 @@ export default function App() {
   }, [])
 
   const switcherCommands = [
-    { id: 'new-note', icon: Plus, label: '새 노트 만들기', hint: 'Ctrl+Alt+N', run: createBlankNote },
+    { id: 'new-note', icon: Plus, label: '새 노트 만들기', hint: 'Ctrl+Alt+N', run: requestNewNote },
+    { id: 'new-folder', icon: FolderPlus, label: '새 폴더 만들기', run: () => setFolderModal({ parentId: null }) },
     { id: 'session-note', icon: CalendarPlus, label: '오늘 세션 노트 만들기', run: () => setSessionNoteOpen(true) },
     { id: 'judge-sync', icon: Trophy, label: '저지 동기화 (AC 자동 반영)', run: () => syncJudges() },
     {
@@ -3214,9 +3928,19 @@ export default function App() {
         collapsed={uiState.sidebarCollapsed}
         onToggleCollapse={toggleSidebarCollapsed}
         notes={notes}
+        folders={folders}
+        collapsedFolders={collapsedFolders}
+        folderActions={{
+          onToggleFolder: toggleFolder,
+          onMoveNote: moveNoteToFolder,
+          onNewNoteInFolder: requestNewNoteInFolder,
+          onEditFolder: setFolderModal,
+          onDeleteFolder: deleteFolder,
+        }}
         activeNoteId={uiState.activeNoteId}
         onSelectNote={(id) => setUiState((s) => ({ ...s, activeNoteId: id }))}
-        onNewNote={createBlankNote}
+        onNewNote={requestNewNote}
+        onNewFolder={() => setFolderModal({ parentId: null })}
         onDeleteNote={deleteNote}
         syncStatus={syncStatus}
         lastSyncAt={lastSyncAt}
@@ -3230,6 +3954,7 @@ export default function App() {
         ) : uiState.activeView === 'board' ? (
           <ProblemBoard
             problems={problems}
+            groups={problemGroups}
             boardMode={boardMode}
             onSetBoardMode={(mode) => setUiState((s) => ({ ...s, boardMode: mode }))}
             onAddClick={() => setProblemModal({})}
@@ -3239,11 +3964,15 @@ export default function App() {
             onStatusChange={changeProblemStatus}
             onReviewRetry={retryReviewProblem}
             onReviewComplete={completeReviewProblem}
+            collapsedGroups={collapsedGroups}
+            onToggleGroup={toggleProblemGroup}
+            onRenameGroup={renameProblemGroup}
+            onClearGroup={clearProblemGroup}
           />
         ) : (
           <EditorView
             activeNote={activeNote}
-            onNewNote={createBlankNote}
+            onNewNote={requestNewNote}
             onUpdateNote={updateNote}
             onPublish={publishNote}
             publishing={publishing}
@@ -3255,6 +3984,7 @@ export default function App() {
             problems={problems}
             onOpenWikiLink={openWikiLink}
             onSelectNote={(id) => setUiState((s) => ({ ...s, activeNoteId: id }))}
+            onToast={addToast}
           />
         )}
       </main>
@@ -3262,6 +3992,7 @@ export default function App() {
       {switcherOpen && (
         <QuickSwitcher
           notes={notes}
+          folders={folders}
           problems={problems}
           commands={switcherCommands}
           onClose={() => setSwitcherOpen(false)}
@@ -3273,8 +4004,15 @@ export default function App() {
         />
       )}
       {problemModal !== null && (
-        <ProblemModal initial={problemModal.id ? problemModal : null} onClose={() => setProblemModal(null)} onSave={upsertProblem} />
+        <ProblemModal
+          initial={problemModal.id ? problemModal : null}
+          groups={problemGroups}
+          onClose={() => setProblemModal(null)}
+          onSave={upsertProblem}
+        />
       )}
+      {folderModal !== null && <FolderModal initial={folderModal} folders={folders} onClose={() => setFolderModal(null)} onSave={upsertFolder} />}
+      {newNoteModal !== null && <NewNoteModal snippets={snippets} onClose={() => setNewNoteModal(null)} onCreate={createNoteFromChoice} />}
       {reviewModal !== null && <ReviewModal problem={reviewModal} onSelect={applyReviewChoice} onClose={() => applyReviewChoice(null)} />}
       {sessionNoteOpen && <SessionNoteModal onClose={() => setSessionNoteOpen(false)} onCreate={createSessionNote} />}
       {snippetsOpen && (
