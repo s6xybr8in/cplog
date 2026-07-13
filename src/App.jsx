@@ -336,6 +336,71 @@ function fromBase64(b64) {
   return new TextDecoder().decode(Uint8Array.from(binary, (c) => c.charCodeAt(0)))
 }
 
+// --- 이미지 에셋 (data 리포 assets/ 업로드 + IndexedDB 로컬 캐시) ---
+// 노트 본문엔 ![](assets/<id>.<ext>) 짧은 링크만. 실체 blob은 IndexedDB에 캐시하고
+// 데이터 리포 assets/<id>.<ext>로 업로드해 기기 간 동기화한다(private 리포라 프리뷰는 캐시/API로 로드).
+const MIME_EXT = {
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/gif': 'gif',
+  'image/webp': 'webp',
+  'image/svg+xml': 'svg',
+  'image/bmp': 'bmp',
+  'image/avif': 'avif',
+}
+const isAssetPath = (p) => p.startsWith('assets/')
+// path -> object URL. 붙여넣기 즉시 채워 프리뷰가 IndexedDB 왕복 없이 바로 표시.
+const assetCache = new Map()
+
+const IDB_NAME = 'cplog'
+const IDB_STORE = 'assets'
+let idbPromise = null
+function openIdb() {
+  if (idbPromise) return idbPromise
+  idbPromise = new Promise((resolve, reject) => {
+    const req = indexedDB.open(IDB_NAME, 1)
+    req.onupgradeneeded = () => req.result.createObjectStore(IDB_STORE)
+    req.onsuccess = () => resolve(req.result)
+    req.onerror = () => reject(req.error)
+  })
+  return idbPromise
+}
+async function idbPutAsset(key, blob) {
+  const db = await openIdb()
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE, 'readwrite')
+    tx.objectStore(IDB_STORE).put(blob, key)
+    tx.oncomplete = () => resolve()
+    tx.onerror = () => reject(tx.error)
+  })
+}
+async function idbGetAsset(key) {
+  const db = await openIdb()
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE, 'readonly')
+    const req = tx.objectStore(IDB_STORE).get(key)
+    req.onsuccess = () => resolve(req.result || null)
+    req.onerror = () => reject(req.error)
+  })
+}
+
+// Blob -> 순수 base64(데이터 URI 프리픽스 제거) — GitHub Contents API PUT 바디용
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader()
+    r.onload = () => resolve(String(r.result).slice(String(r.result).indexOf(',') + 1))
+    r.onerror = () => reject(r.error)
+    r.readAsDataURL(blob)
+  })
+}
+// base64 문자열 -> 바이너리 Uint8Array (Contents API GET 응답 디코드)
+function base64ToBytes(b64) {
+  const bin = atob(b64.replace(/\s/g, ''))
+  const bytes = new Uint8Array(bin.length)
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+  return bytes
+}
+
 async function safeJson(res) {
   try {
     return await res.json()
@@ -533,7 +598,9 @@ function useGithubSync({ settings, notes, setNotes, problems, setProblems, snipp
     if (!treeRes.ok) throw new Error((await safeJson(treeRes))?.message || `원격 목록 조회 실패 (${treeRes.status})`)
 
     const entries = ((await treeRes.json()).tree || []).filter(
-      (e) => e.type === 'blob' && (e.path === 'problems.json' || e.path === 'folders.json' || isNotePath(e.path) || isSnippetPath(e.path)),
+      (e) =>
+        e.type === 'blob' &&
+        (e.path === 'problems.json' || e.path === 'folders.json' || isNotePath(e.path) || isSnippetPath(e.path) || isAssetPath(e.path)),
     )
     const remoteShas = Object.fromEntries(entries.map((e) => [e.path, e.sha]))
     const files = { ...filesRef.current }
@@ -541,6 +608,11 @@ function useGithubSync({ settings, notes, setNotes, problems, setProblems, snipp
     // 원격 변경분 채택 — 로컬에서 편집 중(dirty)인 파일은 로컬 우선(push가 덮어씀)
     for (const entry of entries) {
       if (files[entry.path] === entry.sha || dirtyRef.current.has(entry.path)) continue
+      // 이미지 에셋은 통째로 내려받지 않고 sha만 기록(지연 로드) — 프리뷰가 참조할 때 API로 가져와 캐시
+      if (isAssetPath(entry.path)) {
+        files[entry.path] = entry.sha
+        continue
+      }
       const res = await ghData(`/contents/${entry.path}?ref=${branch}`)
       if (!res.ok) continue
       const text = fromBase64((await res.json()).content || '')
@@ -649,6 +721,34 @@ function useGithubSync({ settings, notes, setNotes, problems, setProblems, snipp
     }
 
     for (const path of [...dirtyRef.current]) {
+      // 이미지 에셋: IndexedDB blob을 base64로 직접 업로드(텍스트 인코딩·병합 로직 없음)
+      if (isAssetPath(path)) {
+        let blob = null
+        try {
+          blob = await idbGetAsset(path)
+        } catch {
+          // IndexedDB 접근 불가(프라이빗 모드 등) — 업로드 스킵
+        }
+        if (!blob) {
+          dirtyRef.current.delete(path)
+          continue
+        }
+        const b64 = await blobToBase64(blob)
+        const doPutAsset = (sha) =>
+          ghData(`/contents/${path}`, {
+            method: 'PUT',
+            body: JSON.stringify({ message: `sync: ${path}`, content: b64, branch, ...(sha ? { sha } : {}) }),
+          })
+        let ares = await doPutAsset(files[path])
+        if (ares.status === 409 || ares.status === 422) {
+          const gr = await ghData(`/contents/${path}?ref=${branch}`)
+          if (gr.ok) ares = await doPutAsset((await gr.json()).sha)
+        }
+        if (!ares.ok) throw new Error((await safeJson(ares))?.message || `${path} 업로드 실패 (${ares.status})`)
+        files[path] = (await ares.json()).content.sha
+        dirtyRef.current.delete(path)
+        continue
+      }
       let content
       if (path === 'problems.json') {
         content = JSON.stringify(problemsRef.current, null, 2)
@@ -2549,30 +2649,34 @@ const cmBaseExtensions = [
   keymap.of([indentWithTab, ...defaultKeymap, ...historyKeymap, ...searchKeymap]),
 ]
 
-// 붙여넣기/드롭한 이미지 파일을 base64 data URI ![]() 로 지정 위치에 삽입.
-// 2MB 초과는 거부 — localStorage(~5MB)·노트 md 페이로드 보호.
-const MAX_PASTE_IMAGE_BYTES = 2 * 1024 * 1024
-function insertImageFile(view, file, pos, onToast) {
+// 붙여넣기/드롭한 이미지 파일을 assets/<id>.<ext> 파일로 처리하고 노트엔 ![](경로) 짧은 링크만 삽입.
+// 실체 blob은 IndexedDB 캐시(+in-memory objectURL) → 프리뷰 즉시 표시, onAddAsset이 데이터 리포 업로드 큐에 등록.
+const MAX_PASTE_IMAGE_BYTES = 10 * 1024 * 1024
+function insertImageFile(view, file, pos, { onToast, onAddAsset }) {
   if (file.size > MAX_PASTE_IMAGE_BYTES) {
-    onToast?.('error', '이미지가 너무 큽니다 (최대 2MB). 링크로 삽입하거나 크기를 줄여주세요.')
+    onToast?.('error', '이미지가 너무 큽니다 (최대 10MB). 크기를 줄여주세요.')
     return
   }
-  const reader = new FileReader()
-  reader.onload = () => {
-    const at = pos ?? view.state.selection.main.from
-    const insert = `![이미지](${reader.result})`
-    view.dispatch({ changes: { from: at, to: at, insert }, selection: { anchor: at + insert.length } })
-    view.focus()
-  }
-  reader.readAsDataURL(file)
+  const ext = MIME_EXT[file.type] || 'png'
+  const path = `assets/${uid()}.${ext}`
+  // 프리뷰가 즉시 볼 수 있게 objectURL을 먼저 캐시하고, IndexedDB엔 영속 저장(백그라운드)
+  assetCache.set(path, URL.createObjectURL(file))
+  idbPutAsset(path, file).catch(() => {})
+  onAddAsset?.(path)
+  const at = pos ?? view.state.selection.main.from
+  const insert = `![](${path})`
+  view.dispatch({ changes: { from: at, to: at, insert }, selection: { anchor: at + insert.length } })
+  view.focus()
 }
 
-function SourcePane({ noteId, content, onChange, viewRef, notes, problems, onToast }) {
+function SourcePane({ noteId, content, onChange, viewRef, notes, problems, onToast, onAddAsset }) {
   const containerRef = useRef(null)
   const onChangeRef = useRef(onChange)
   onChangeRef.current = onChange
   const onToastRef = useRef(onToast)
   onToastRef.current = onToast
+  const onAddAssetRef = useRef(onAddAsset)
+  onAddAssetRef.current = onAddAsset
   // CM이 마지막으로 알고 있는 내용 — 외부 변경(원격 pull)과 자체 편집을 구분해 루프 방지
   const lastContentRef = useRef(null)
   // [[ 자동완성이 항상 최신 목록을 읽도록 ref로 전달 (extensions는 1회만 생성되므로)
@@ -2605,7 +2709,8 @@ function SourcePane({ noteId, content, onChange, viewRef, notes, problems, onToa
       ]
       return { from: match.from + 2, options, validFor: /^[^\]\n]*$/ }
     }
-    // 클립보드/드래그의 이미지 파일 → base64 삽입. 이미지가 없으면 false 반환해 기본 동작(텍스트) 유지.
+    // 클립보드/드래그의 이미지 파일 → assets/ 삽입. 이미지가 없으면 false 반환해 기본 동작(텍스트) 유지.
+    const imgHandlers = () => ({ onToast: onToastRef.current, onAddAsset: onAddAssetRef.current })
     const imageEventHandlers = CMEditorView.domEventHandlers({
       paste: (event, view) => {
         const items = [...(event.clipboardData?.items || [])]
@@ -2614,7 +2719,7 @@ function SourcePane({ noteId, content, onChange, viewRef, notes, problems, onToa
         const file = item.getAsFile()
         if (!file) return false
         event.preventDefault()
-        insertImageFile(view, file, null, onToastRef.current)
+        insertImageFile(view, file, null, imgHandlers())
         return true
       },
       drop: (event, view) => {
@@ -2622,7 +2727,7 @@ function SourcePane({ noteId, content, onChange, viewRef, notes, problems, onToa
         if (!file) return false // 사이드바 노트 DnD 등 파일 아닌 드롭은 그대로 통과
         event.preventDefault()
         const pos = view.posAtCoords({ x: event.clientX, y: event.clientY })
-        insertImageFile(view, file, pos, onToastRef.current)
+        insertImageFile(view, file, pos, imgHandlers())
         return true
       },
     })
@@ -2714,7 +2819,33 @@ function remarkWikiLinks() {
   return transform
 }
 
-function MarkdownPreview({ content, notes, onOpenWikiLink }) {
+// assets/ 경로 이미지를 로컬 캐시(→IndexedDB→데이터 리포 API) 순으로 비동기 해석해 표시.
+// data:/http(s) 등 그 외 src는 그대로. (구버전 base64 노트 호환)
+function AssetImage({ src, alt, resolveAsset }) {
+  const [state, setState] = useState(() => (isAssetPath(src || '') ? { status: 'loading', url: null } : { status: 'ok', url: src }))
+  useEffect(() => {
+    if (!isAssetPath(src || '')) {
+      setState({ status: 'ok', url: src })
+      return
+    }
+    let alive = true
+    setState({ status: 'loading', url: null })
+    Promise.resolve(resolveAsset?.(src)).then((u) => {
+      if (alive) setState(u ? { status: 'ok', url: u } : { status: 'missing', url: null })
+    })
+    return () => {
+      alive = false
+    }
+  }, [src, resolveAsset])
+
+  if (state.status === 'loading')
+    return <span className="inline-block rounded bg-surface-alt px-2 py-1 text-[11px] text-ink-faint">이미지 불러오는 중…</span>
+  if (state.status === 'missing')
+    return <span className="inline-block rounded bg-surface-alt px-2 py-1 text-[11px] text-ink-faint">🖼️ 이미지를 찾을 수 없습니다 (동기화 필요)</span>
+  return <img src={state.url} alt={alt || ''} />
+}
+
+function MarkdownPreview({ content, notes, onOpenWikiLink, resolveAsset }) {
   const noteTitles = useMemo(() => new Set(notes.map((n) => (n.title || '').trim()).filter(Boolean)), [notes])
   return (
     <div className="h-full overflow-y-auto bg-surface p-5">
@@ -2722,9 +2853,13 @@ function MarkdownPreview({ content, notes, onOpenWikiLink }) {
         <ReactMarkdown
           remarkPlugins={[remarkGfm, remarkMath, remarkWikiLinks]}
           rehypePlugins={[rehypeKatex, rehypeHighlight]}
-          // 기본 urlTransform은 data: URI를 제거해 붙여넣은 이미지가 깨진다 — 이미지 data URI만 통과시킴
-          urlTransform={(url) => (url.startsWith('data:image/') ? url : defaultUrlTransform(url))}
+          // 기본 urlTransform은 data:·상대경로를 필터링 — 이미지 data URI(구버전)와 assets/ 상대경로를 통과시킴
+          urlTransform={(url) => (url.startsWith('data:image/') || isAssetPath(url) ? url : defaultUrlTransform(url))}
           components={{
+            // eslint-disable-next-line no-unused-vars
+            img({ src, alt, node, ...props }) {
+              return <AssetImage src={src} alt={alt} resolveAsset={resolveAsset} {...props} />
+            },
             // eslint-disable-next-line no-unused-vars
             a({ href, children, node, ...props }) {
               if (href?.startsWith('#wiki:')) {
@@ -2816,6 +2951,8 @@ function EditorView({
   onOpenWikiLink,
   onSelectNote,
   onToast,
+  onAddAsset,
+  resolveAsset,
 }) {
   const cmViewRef = useRef(null)
 
@@ -2854,7 +2991,7 @@ function EditorView({
           />
           <div className="flex-1 overflow-hidden">
             {editorMode === 'preview' ? (
-              <MarkdownPreview content={activeNote.content} notes={notes} onOpenWikiLink={onOpenWikiLink} />
+              <MarkdownPreview content={activeNote.content} notes={notes} onOpenWikiLink={onOpenWikiLink} resolveAsset={resolveAsset} />
             ) : (
               <SourcePane
                 noteId={activeNote.id}
@@ -2864,6 +3001,7 @@ function EditorView({
                 notes={notes}
                 problems={problems}
                 onToast={onToast}
+                onAddAsset={onAddAsset}
               />
             )}
           </div>
@@ -3657,6 +3795,40 @@ export default function App() {
     for (const n of toMove) markDirty(`notes/${n.id}.md`)
   }
 
+  // --- 이미지 에셋: 붙여넣기 시 업로드 큐 등록 + 프리뷰용 경로 해석 ---
+  const addAsset = (path) => markDirty(path) // 데이터 리포 업로드 큐(다음 동기화에 반영)
+  // assets/ 경로 → objectURL. 캐시 → IndexedDB → (동기화 설정 시)데이터 리포 Contents API 순
+  const resolveAsset = useCallback(
+    async (path) => {
+      if (!isAssetPath(path)) return path
+      if (assetCache.has(path)) return assetCache.get(path)
+      let blob = null
+      try {
+        blob = await idbGetAsset(path)
+      } catch {
+        // IndexedDB 접근 불가
+      }
+      if (!blob && isSyncConfigured(gh)) {
+        try {
+          const branch = gh.dataBranch?.trim() || 'main'
+          const res = await ghFetch(gh.pat, `/repos/${gh.username.trim()}/${gh.dataRepo.trim()}/contents/${path}?ref=${branch}`)
+          if (res.ok) {
+            const json = await res.json()
+            blob = new Blob([base64ToBytes(json.content || '')])
+            idbPutAsset(path, blob).catch(() => {})
+          }
+        } catch {
+          // 네트워크 실패 — 아래에서 null 반환(플레이스홀더)
+        }
+      }
+      if (!blob) return null
+      const url = URL.createObjectURL(blob)
+      assetCache.set(path, url)
+      return url
+    },
+    [gh],
+  )
+
   // --- 그룹 (문제집) ---
 
   const problemGroups = useMemo(() => [...new Set(problems.map((p) => p.group).filter(Boolean))], [problems])
@@ -4209,6 +4381,8 @@ export default function App() {
             onOpenWikiLink={openWikiLink}
             onSelectNote={(id) => setUiState((s) => ({ ...s, activeNoteId: id }))}
             onToast={addToast}
+            onAddAsset={addAsset}
+            resolveAsset={resolveAsset}
           />
         )}
       </main>
