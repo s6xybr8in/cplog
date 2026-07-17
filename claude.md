@@ -1,56 +1,20 @@
 # 프로젝트 명: CP-Log (Competitive Programming 개인 노시디언 & 블로그 퍼블리셔)
 
 ## 📌 역할 설정
-너는 프론트엔드 개발 및 생산성 도구 설계의 전문가야. React, Tailwind CSS, Lucide-react 아이콘을 활용하여 단일 파일로 동작하는 인터랙티브 웹 애플리케이션(Artifacts)을 만들어줘. UI는 깔끔하고 직관적인 화이트(Light) 테마 기반의 모던한 디자인으로 구성해 줘.
+너는 프론트엔드 개발 및 생산성 도구 설계의 전문가야. React, Tailwind CSS, Lucide-react 아이콘을 활용하여 동작하는 인터랙티브 웹 애플리케이션(Artifacts)을 만들어줘. UI는 깔끔하고 직관적인 다크(Dark) 테마 기반의 모던한 디자인으로 구성해 줘.
 
 ## 🚀 핵심 목표
 알고리즘 문제 해결(CP/PS) 학습을 위한 개인용 노션(Notion) 스타일의 에디터이자, 작성한 오답 노트와 풀이를 GitHub Pages(기술 블로그)로 원클릭 자동 푸시하는 통합 웹앱을 구축한다. (주요 타겟 플랫폼: Codeforces, AtCoder, USACO, KOI)
-
-## 🛠️ 주요 요구사항 및 기능 상세
-
-### 1. To Solve (풀 문제 관리) 보드
-- **레이아웃**: 노션의 칸반(Kanban) 보드 또는 데이터 그릴드 스타일.
-- **데이터 필드**: 문제 이름/링크, 플랫폼(Codeforces, AtCoder 등), 난이도, 태그(수론, 그리디, DP 등), 상태(To Do, In Progress, Done).
-- **인터랙션**: 상태를 'Done'으로 변경 시, 해당 문제 데이터를 기반으로 한 '오답 노트 작성(Editor)' 탭으로 자동 전환되며 기본 템플릿이 로드됨.
-
-### 2. Markdown & PS 특화 에디터 (Dual-Pane)
-- **레이아웃**: 좌측은 마크다운 작성 에디터, 우측은 실시간 프리뷰 렌더링.
-- **PS 특화 렌더링**:
-  - 수학 수식 완벽 지원 (LaTeX 문법, `$O(N \log N)$` 등 렌더링).
-  - C++ 및 Python 코드 블록 구문 강조(Syntax Highlighting) 지원.
-- **템플릿 자동화**: 에디터 상단에 [PS 풀이 템플릿 로드] 버튼을 두어 아래 양식을 삽입.
-  - 접근 방식 (핵심 알고리즘)
-  - 시간/공간 복잡도 분석
-  - WA(맞왜틀) 원인 및 디버깅 기록
-  - 정답 C++ 코드
-
-### 3. GitHub Blog 원클릭 퍼블리셔 (핵심 기능)
-- **설정 모달 (Settings)**:
-  - GitHub Username, Repository Name, Branch Name(기본 `main`), Personal Access Token (PAT)을 입력받음. (입력값은 브라우저 LocalStorage에 안전하게 저장)
-- **🚀 Publish 버튼**: 에디터 우측 상단에 배치.
-- **발행 로직**:
-  - 버튼 클릭 시 작성된 마크다운 상단에 Jekyll/Hugo 블로그용 Front Matter(title, date, categories, tags)를 자동 부착.
-  - GitHub REST API (`PUT /repos/{owner}/{repo}/contents/_posts/{YYYY-MM-DD-title}.md`)를 호출하여 리포지토리에 파일 커밋.
-  - 성공/실패 여부를 토스트(Toast) 알림으로 UI에 피드백.
-
-### 4. 로컬 데이터 저장소 (Local Storage)
-- 브라우저를 새로고침하거나 껐다 켜도 작성 중이던 글, To Solve 리스트, GitHub 설정값이 날아가지 않도록 모든 State를 `localStorage`와 동기화(Sync).
-
-## 💻 출력 형식 제한
-- 모든 컴포넌트, 상태 관리 로직, API 호출 로직을 포함한 **단일 React 컴포넌트 코드**로 출력해 줘.
-- 백엔드 서버 없이 브라우저 상에서 완벽히 동작해야 하므로 API 호출은 `fetch`를 이용한 클라이언트 사이드 호출로 구현해 줘.
-
----
 
 # 📈 프로젝트 진행 상황 (2026-07-12 기준)
 
 ## 구현 형태 (원문 스펙에서 확정된 해석)
 - claude.ai Artifact 스니펫이 아니라 **실행 가능한 Vite + React 19 프로젝트**로 구현 (사용자 선택). `npm install && npm run dev`로 구동.
-- 모든 앱 로직은 스펙의 "단일 컴포넌트" 취지대로 `src/App.jsx` 한 파일에 유지 (서브컴포넌트/훅/헬퍼 포함).
+- ~~모든 앱 로직은 `src/App.jsx` 한 파일에 유지~~ → **2026-07-17 사용자 요청으로 계층 폴더 구조로 리팩토링** (본문 무변경 이동, named export). `src/App.jsx`(앱 셸: 상태·핸들러·라우팅, ~870줄) / `constants.js` / `lib/`(utils·problems·snippets·markdown·github·assets) / `hooks/`(useLocalStorageState·useGithubSync) / `components/`(ui/·sidebar/·board/·editor/·modals/·stats/·QuickSwitcher). 컴포넌트 전용 헬퍼는 사용처 파일에 내장(예: insertImageFile→SourcePane, buildFolderTree→Sidebar, TagInlineAdd·SnippetDropdown→EditorMetaBar). 검증: vite build + 전 컴포넌트 렌더 스모크 E2E 18건(pageerror 캡처) 통과.
 - 스택: Tailwind CSS v4(`@tailwindcss/vite`, CSS-first `@theme` 토큰), lucide-react, react-markdown + remark-gfm/math + rehype-katex/highlight, CodeMirror 6(`codemirror` + lang-markdown + language-data), @fontsource (Manrope / IBM Plex Mono / Source Serif 4). devDep: playwright(E2E 검증용 — extraneous로 두면 npm install 때 prune되므로 반드시 devDependencies 유지).
 
 ## 🔄 원문 스펙에서 변경된 사항 (사용자 결정이 원문에 우선)
-1. **테마**: 원문은 "화이트(Light) 테마 기반"이지만, 이후 요청으로 **다크 테마가 기본**, 라이트는 사이드바 토글로 전환 (`:root[data-theme]` + CSS 변수 토큰, `cplog_theme` localStorage).
+1. **테마**: **다크 테마가 기본**, 라이트는 사이드바 토글로 전환 (`:root[data-theme]` + CSS 변수 토큰, `cplog_theme` localStorage).
 2. **에디터 레이아웃**: 원문의 상시 듀얼페인(좌 에디터/우 프리뷰) 대신 **Obsidian식 편집↔미리보기 토글** (전체 폭 단일 페인). 사이드바도 통합형(노트 목록 포함) + 접기 가능한 구조로 개편.
 3. **[PS 풀이 템플릿 로드] 버튼**: 완전 삭제됨 (스니펫이 대체).
 4. **To Solve 기본 뷰 = 리스트(표), 칸반은 토글 뒤로** (2026-07-12, 사용자 UX 피드백): 칸반의 낮은 밀도·단건 입력 강요·빈 컬럼 공간 낭비 지적. 사용자 실제 기록 습관은 세션(셋) 단위 데일리 마크다운(예: 260709.md — "## A" 헤딩별 한두 줄 + "# Upsolving" 빈 헤딩 = 투두). UX 방향 논의에서 A(세트 행 모델)·B(인박스+리스트)·C(노트 파싱) 중 **B 선택** — 붙여넣기 캡처 바 + 고밀도 표, 셋 개념은 문제 이름에 포함("BCD4 E"). 칸반은 삭제하지 않고 헤더 토글로 유지.
