@@ -1545,7 +1545,7 @@ function ProblemTable({
   const sortRows = (arr) =>
     [...arr].sort((a, b) => (STATUS_ORDER[a.status] ?? 1) - (STATUS_ORDER[b.status] ?? 1) || (b.createdAt || 0) - (a.createdAt || 0))
 
-  // 그룹(문제집)별 섹션 — 최근에 문제가 추가된 그룹부터, '그룹 없음'은 맨 뒤.
+  // 그룹(문제집)별 섹션 — 항상 그룹 이름순, '그룹 없음'은 맨 뒤.
   // 그룹이 하나도 없으면 섹션 헤더 없이 기존 단일 표 그대로.
   const byGroup = new Map()
   for (const p of problems) {
@@ -1553,10 +1553,9 @@ function ProblemTable({
     if (!byGroup.has(g)) byGroup.set(g, [])
     byGroup.get(g).push(p)
   }
-  const latest = (arr) => Math.max(...arr.map((p) => p.createdAt || 0))
   const named = [...byGroup.entries()]
     .filter(([g]) => g)
-    .sort((a, b) => latest(b[1]) - latest(a[1]))
+    .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }))
     .map(([g, arr]) => ({ key: g, name: g, rows: sortRows(arr), named: true }))
   const sections = named.length
     ? [...named, ...(byGroup.has('') ? [{ key: UNGROUPED_KEY, name: '그룹 없음', rows: sortRows(byGroup.get('')), named: false }] : [])]
@@ -2685,15 +2684,43 @@ function SourcePane({ noteId, content, onChange, viewRef, notes, problems, onToa
 
   const extensionsRef = useRef(null)
   if (extensionsRef.current === null) {
-    // 옵시디언식 [[ 링크 자동완성 — 노트는 [[제목]], 문제는 [이름](url)로 삽입
+    // 옵시디언식 [[ 링크 자동완성 — 노트는 [[제목]], 문제는 [이름](url), 그룹(문제집)은 체크리스트로 삽입
     const linkCompletionSource = (context) => {
       const match = context.matchBefore(/\[\[([^\]\n]*)$/)
       if (!match) return null
       const { notes: ns, problems: ps } = linkDataRef.current
+      const groups = new Map()
+      for (const p of ps) {
+        if (!p.group) continue
+        if (!groups.has(p.group)) groups.set(p.group, [])
+        groups.get(p.group).push(p)
+      }
       const options = [
         ...ns
           .filter((n) => n.title?.trim())
           .map((n) => ({ label: n.title, detail: '노트', apply: `${n.title}]]` })),
+        ...[...groups.entries()]
+          .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }))
+          .map(([name, rows]) => ({
+            label: name,
+            detail: `문제집 · ${rows.length}문제`,
+            apply: (view, _completion, from, to) => {
+              // 그룹 문제들을 등록순 GFM 체크리스트 스냅샷으로 펼쳐 삽입 (Done = 체크)
+              const list = [...rows]
+                .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))
+                .map((p) => `- [${p.status === 'done' ? 'x' : ' '}] ${p.url ? `[${p.name}](${p.url})` : p.name}`)
+                .join('\n')
+              // 리스트가 마크다운으로 렌더되도록 줄 경계 보정 — [[ 앞뒤에 같은 줄 내용이 있으면 개행
+              const start = from - 2
+              const doc = view.state.doc
+              const before = start > doc.lineAt(start).from ? '\n' : ''
+              const after = to < doc.lineAt(to).to ? '\n' : ''
+              view.dispatch({
+                changes: { from: start, to, insert: before + list + after },
+                selection: { anchor: start + before.length + list.length },
+              })
+            },
+          })),
         ...ps.map((p) => ({
           label: p.name,
           detail: p.platform,
@@ -3838,7 +3865,10 @@ export default function App() {
 
   // --- 그룹 (문제집) ---
 
-  const problemGroups = useMemo(() => [...new Set(problems.map((p) => p.group).filter(Boolean))], [problems])
+  const problemGroups = useMemo(
+    () => [...new Set(problems.map((p) => p.group).filter(Boolean))].sort((a, b) => a.localeCompare(b, undefined, { numeric: true })),
+    [problems],
+  )
   const collapsedGroups = uiState.collapsedGroups || []
   const toggleProblemGroup = (key) =>
     setUiState((s) => {
