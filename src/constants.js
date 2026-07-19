@@ -15,14 +15,14 @@ const LS_KEYS = {
   SYNC: 'cplog_sync_state',
 }
 
-const PLATFORMS = ['Codeforces', 'AtCoder', 'BOJ', 'USACO', 'KOI', 'Other']
+const PLATFORMS = ['Codeforces', 'AtCoder', 'BOJ', 'USACO', 'JUNGOL', 'Other']
 
 const PLATFORM_BADGE = {
   Codeforces: 'bg-tier-blue/10 text-tier-blue',
   AtCoder: 'bg-tier-cyan/10 text-tier-cyan',
   BOJ: 'bg-tier-purple/10 text-tier-purple',
   USACO: 'bg-tier-green/10 text-tier-green',
-  KOI: 'bg-tier-orange/10 text-tier-orange',
+  JUNGOL: 'bg-tier-orange/10 text-tier-orange',
   Other: 'bg-surface-alt text-ink-muted',
 }
 
@@ -45,7 +45,7 @@ const COLUMNS = [
 // 리스트 뷰 정렬 순서 — 미해결이 위, 끝난 문제가 맨 아래
 const STATUS_ORDER = { todo: 0, done: 1 }
 
-const TAG_SUGGESTIONS = ['DP', '그리디', '그래프', '이분탐색', '수론', 'BFS/DFS', '자료구조', '문자열', '구현']
+const TAG_SUGGESTIONS = ['DP', 'Greedy', 'Graph', 'Binary Search', 'Number Theory', 'BFS/DFS', 'Data Structures', 'Strings', 'Implementation', 'Math', 'Geometry', 'Combinatorics', 'Brute Force', 'Divide and Conquer', 'Backtracking', 'Bitmasking', 'Segment Tree', 'Fenwick Tree', 'Heap/Priority Queue', 'Hashing', 'Two Pointers', 'Sliding Window', 'Queue/Deque', 'Stack', 'Trie', 'SCC/Topological Sort', 'Dijkstra/A*', 'Bellman-Ford/Floyd-Warshall', 'SPFA', 'Floyd Cycle Detection', 'Union-Find/Disjoint Set Union (DSU)', 'Kruskal/Prim (MST)', 'Eulerian Path/Circuit', 'Hamiltonian Path/Circuit', 'Convex Hull', 'Line Sweep', 'Segment Intersection', 'Closest Pair of Points', 'Voronoi Diagram', 'Delaunay Triangulation', 'Dynamic Convex Hull', 'Persistent Data Structures', 'Heavy-Light Decomposition', 'Centroid Decomposition', 'Mo’s Algorithm', 'Sqrt Decomposition', 'Randomized Algorithms', 'Monte Carlo Method', 'Las Vegas Algorithm', 'Approximation Algorithms', 'Online Algorithms']
 
 // 폴더 색상 프리셋 — 다크/라이트 양쪽에서 읽히는 500 계열 고정 hue
 const FOLDER_COLORS = {

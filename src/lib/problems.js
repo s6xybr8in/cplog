@@ -21,10 +21,15 @@ function parseProblemUrl(url) {
     m = path.match(/\/problem\/(\d+)/)
     return { platform: 'BOJ', name: m ? `BOJ ${m[1]}` : '' }
   }
-  if (host.endsWith('usaco.org')) {
-    const cpid = u.searchParams.get('cpid')
-    return { platform: 'USACO', name: cpid ? `USACO ${cpid}` : '' }
-  }
+    if (host.endsWith('usaco.org')) {
+      const cpid = u.searchParams.get('cpid')
+      return { platform: 'USACO', name: cpid ? `USACO ${cpid}` : '' }
+    }
+    if (host.endsWith('jungol.co.kr')) {
+      m = path.match(/\/problem\/(\d+)/)
+      const problemId = m[1]
+      return { platform: 'JUNGOL', name: problemId ? `JUNGOL ${problemId}` : '' }
+    }
   return { platform: 'Other', name: '' }
 }
 
