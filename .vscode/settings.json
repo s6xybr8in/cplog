@@ -1,0 +1,12 @@
+{
+  // 에디터의 재귀 파일 워처가 새로 생긴 빌드 산출물 디렉터리에 핸들을 잡으면
+  // electron-builder의 `win-unpacked.tmp` → `win-unpacked` 이름 변경이 EPERM으로 실패한다.
+  // (프로젝트 폴더 밖에서는 같은 빌드가 정상 동작하는 것으로 확인됨 — 설정 변경 후 창 다시 로드 필요)
+  "files.watcherExclude": {
+    "**/node_modules/**": true,
+    "**/dist/**": true,
+    "**/dist-electron/**": true,
+    "**/release/**": true,
+    "**/.omc/**": true
+  }
+}

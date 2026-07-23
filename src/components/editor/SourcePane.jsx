@@ -4,7 +4,7 @@ import { EditorState, Transaction } from '@codemirror/state'
 import { history, defaultKeymap, historyKeymap, indentWithTab } from '@codemirror/commands'
 import { search, searchKeymap } from '@codemirror/search'
 import { autocompletion, startCompletion } from '@codemirror/autocomplete'
-import { syntaxHighlighting, HighlightStyle } from '@codemirror/language'
+import { syntaxHighlighting, HighlightStyle, foldGutter, codeFolding, foldKeymap } from '@codemirror/language'
 import { tags } from '@lezer/highlight'
 import { markdown } from '@codemirror/lang-markdown'
 import { languages } from '@codemirror/language-data'
@@ -29,6 +29,34 @@ const cmTheme = CMEditorView.theme({
     color: 'var(--color-ink-muted)',
   },
   '.cm-placeholder': { color: 'var(--color-ink-faint)' },
+  // 코드 접기 — 펼쳐진 줄의 화살표는 에디터 hover 시에만 노출(상시 노출은 시각적 소음), 접힌 줄은 항상 표시
+  '.cm-foldGutter': { minWidth: '14px' },
+  '.cm-foldGutter .cm-gutterElement': { padding: '0 1px', cursor: 'pointer' },
+  // 높이를 한 줄(1.7em)로 고정한 flex — 인라인 정렬은 화살표가 다음 줄로 밀리고, 줄바꿈된 블록에선 중앙으로 흐른다
+  '.cm-foldMarker': {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    height: '1.7em',
+    color: 'var(--color-ink-faint)',
+    opacity: '0',
+    transition: 'opacity 120ms ease',
+  },
+  '.cm-foldMarker[data-open="false"]': { opacity: '1', color: 'var(--color-accent-strong)' },
+  '&:hover .cm-foldMarker': { opacity: '1' },
+  '.cm-gutterElement:hover .cm-foldMarker': { color: 'var(--color-accent-strong)' },
+  '.cm-foldPlaceholder': {
+    backgroundColor: 'var(--color-surface-alt)',
+    border: '1px solid var(--color-border)',
+    color: 'var(--color-ink-muted)',
+    borderRadius: '5px',
+    margin: '0 4px',
+    padding: '0 7px',
+    fontSize: '11.5px',
+    fontFamily: 'var(--font-sans)',
+    cursor: 'pointer',
+  },
+  '.cm-foldPlaceholder:hover': { color: 'var(--color-ink)', borderColor: 'var(--color-accent)' },
   '.cm-panels': { backgroundColor: 'var(--color-surface-alt)', color: 'var(--color-ink)' },
   '.cm-panels-bottom': { borderTop: '1px solid var(--color-border)' },
   // CM 기본 테마가 패널 인풋/버튼에 font-size 70%를 강제해 너무 작게 보임 — 명시 크기로 덮어씀
@@ -111,8 +139,37 @@ const cmHighlightStyle = HighlightStyle.define([
   { tag: [tags.meta, tags.annotation], color: 'var(--code-meta)' },
 ])
 
+// 폴드 거터 화살표 — lucide chevron과 같은 모양의 인라인 SVG(글리프 폰트 편차 회피)
+const foldMarkerDOM = (open) => {
+  const span = document.createElement('span')
+  span.className = 'cm-foldMarker'
+  span.dataset.open = String(open)
+  span.title = open ? '접기' : '펼치기'
+  span.innerHTML =
+    '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5" ' +
+    `stroke-linecap="round" stroke-linejoin="round"><path d="${open ? 'M6 9l6 6 6-6' : 'M9 18l6-6-6-6'}"/></svg>`
+  return span
+}
+
+// 접힌 자리 표시 — 숨겨진 줄 수를 보여주고 클릭하면 펼침
+const foldPlaceholderConfig = {
+  preparePlaceholder: (state, range) => state.doc.lineAt(range.to).number - state.doc.lineAt(range.from).number,
+  placeholderDOM: (view, onclick, lines) => {
+    const el = document.createElement('span')
+    el.className = 'cm-foldPlaceholder'
+    el.textContent = lines > 0 ? `⋯ ${lines}줄` : '⋯'
+    el.title = '펼치기'
+    el.setAttribute('aria-label', '접힌 내용 펼치기')
+    el.onclick = onclick
+    return el
+  },
+}
+
 const cmBaseExtensions = [
   lineNumbers(),
+  // 접기 범위는 마크다운 언어가 제공 — 헤딩 섹션(하위 헤딩 포함), 코드블록, 인용, 표
+  foldGutter({ markerDOM: foldMarkerDOM }),
+  codeFolding(foldPlaceholderConfig),
   highlightActiveLine(),
   history(),
   search(),
@@ -122,7 +179,7 @@ const cmBaseExtensions = [
   cmTheme,
   cmPlaceholder('여기에 마크다운으로 풀이를 작성하세요...'),
   CMEditorView.contentAttributes.of({ spellcheck: 'false' }),
-  keymap.of([indentWithTab, ...defaultKeymap, ...historyKeymap, ...searchKeymap]),
+  keymap.of([indentWithTab, ...defaultKeymap, ...historyKeymap, ...searchKeymap, ...foldKeymap]),
 ]
 
 // 붙여넣기/드롭한 이미지 파일을 assets/<id>.<ext> 파일로 처리하고 노트엔 ![](경로) 짧은 링크만 삽입.

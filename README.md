@@ -61,6 +61,28 @@ Competitive Programming 개인 노트 & 블로그 퍼블리셔. 백엔드 없이
 | `Ctrl+Alt+N` | 새 노트 |
 | `Ctrl+Shift+L` | 위키링크 자동완성 삽입 |
 | `Ctrl+F` | 에디터 내 검색 |
+| `Ctrl+Shift+[` / `]` | 커서 위치의 섹션·코드블록 접기 / 펼치기 |
+| `Ctrl+Alt+[` / `]` | 전체 접기 / 전체 펼치기 |
+
+## Windows 앱
+
+브라우저 없이 데스크톱 앱으로도 쓸 수 있습니다. 웹 버전과 같은 화면이며, 데이터는 앱 자체 저장소에 저장되므로 브라우저에서 쓰던 노트는 **데이터 리포 동기화로 가져옵니다**(설정 → 데이터 저장소 동기화).
+
+`release/` 폴더의 두 가지 중 하나를 쓰면 됩니다.
+
+- `CP-Log Setup 0.1.0.exe` — 설치 파일 (시작 메뉴·바탕화면 바로가기 생성, 설치 위치 선택 가능)
+- `CP-Log-0.1.0-portable.exe` — 설치 없이 실행하는 단일 실행 파일
+
+> 코드 서명을 하지 않아서 첫 실행 때 Windows SmartScreen 경고가 뜹니다. **추가 정보 → 실행**으로 진행하세요.
+
+직접 빌드하려면:
+
+```bash
+npm run dist:win     # release/ 에 설치 파일 + 포터블 exe 생성
+npm run electron:dev # 개발용 (먼저 다른 터미널에서 npm run dev)
+```
+
+`npm install` 후 `node_modules/electron/dist/`가 비어 있으면 `node node_modules/electron/install.js`로 Electron 바이너리를 내려받습니다.
 
 ## 개발
 

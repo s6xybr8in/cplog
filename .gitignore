@@ -3,6 +3,10 @@ dist
 .DS_Store
 *.local
 
+# Electron 데스크톱 빌드 산출물 (렌더러 번들 / 설치 파일)
+dist-electron
+release
+
 # 에이전트 툴링 런타임 상태
 .omc/
 

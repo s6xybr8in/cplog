@@ -1,0 +1,34 @@
+appId: com.s6xybr8in.cplog
+productName: CP-Log
+copyright: CP-Log
+
+directories:
+  output: release
+  buildResources: build
+
+# 렌더러는 Vite가 dist-electron으로 전부 번들하므로 런타임에 node_modules가 필요 없다
+# (메인 프로세스는 electron과 node 빌트인만 사용) — 제외해서 패키지 크기를 줄인다.
+files:
+  - dist-electron/**/*
+  - electron/**/*
+  - package.json
+  - '!node_modules/**/*'
+
+win:
+  icon: build/icon.ico
+  target:
+    - target: nsis
+      arch: [x64]
+    - target: portable
+      arch: [x64]
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: CP-Log
+
+portable:
+  artifactName: CP-Log-${version}-portable.exe
